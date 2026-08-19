@@ -1,0 +1,1173 @@
+ros2 topic echo /battery_state
+
+header:
+  stamp:
+    sec: 1787045051
+    nanosec: 456721757
+  frame_id: ''
+voltage: 13.777999877929688
+temperature: 43.25
+current: 0.37299999594688416
+charge: 0.0989999994635582
+capacity: 2.0490000247955322
+design_capacity: 2.0490000247955322
+percentage: 0.05000000074505806
+power_supply_status: 0
+power_supply_health: 0
+power_supply_technology: 0
+present: true
+cell_voltage: []
+cell_temperature: []
+location: ''
+serial_number: ''
+---
+
+
+leobots@leobotsros:~$ ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+This node takes keypresses from the keyboard and publishes them
+as Twist/TwistStamped messages. It works best with a US keyboard layout.
+---------------------------
+Moving around:
+   u    i    o
+   j    k    l
+   m    ,    .
+
+For Holonomic mode (strafing), hold down the shift key:
+---------------------------
+   U    I    O
+   J    K    L
+   M    <    >
+
+t : up (+z)
+b : down (-z)
+
+anything else : stop
+
+q/z : increase/decrease max speeds by 10%
+w/x : increase/decrease only linear speed by 10%
+e/c : increase/decrease only angular speed by 10%
+
+CTRL-C to quit
+
+
+currently:	speed 0.5	turn 1.0 
+currently:	speed 0.55	turn 1.1 
+currently:	speed 0.6050000000000001	turn 1.2100000000000002 
+currently:	speed 0.6655000000000002	turn 1.3310000000000004 
+currently:	speed 0.7320500000000003	turn 1.4641000000000006 
+currently:	speed 0.8052550000000004	turn 1.6105100000000008 
+currently:	speed 0.8857805000000005	turn 1.771561000000001 
+currently:	speed 0.9743585500000007	turn 1.9487171000000014 
+currently:	speed 1.0717944050000008	turn 2.1435888100000016 
+
+
+
+Ergebnis:
+---
+linear:
+  x: 0.5
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.5
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.5
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.5
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.5
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 1.0717944050000008
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 2.1435888100000016
+---
+linear:
+  x: 1.0717944050000008
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 2.1435888100000016
+---
+linear:
+  x: 1.0717944050000008
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 2.1435888100000016
+---
+linear:
+  x: 1.0717944050000008
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 2.1435888100000016
+---
+linear:
+  x: 1.0717944050000008
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 2.1435888100000016
+---
+
+
+
+
+ros2 topic hz /scan
+
+Werte:
+average rate: 7.408
+	min: 0.117s max: 0.260s std dev: 0.00582s window: 656
+average rate: 7.408
+	min: 0.117s max: 0.260s std dev: 0.00578s window: 664
+average rate: 7.408
+	min: 0.117s max: 0.260s std dev: 0.00575s window: 672
+average rate: 7.409
+	min: 0.117s max: 0.260s std dev: 0.00573s window: 680
+average rate: 7.409
+	min: 0.117s max: 0.260s std dev: 0.00570s window: 688
+average rate: 7.410
+	min: 0.117s max: 0.260s std dev: 0.00570s window: 696
+average rate: 7.409
+	min: 0.117s max: 0.260s std dev: 0.00567s window: 704
+average rate: 7.409
+	min: 0.117s max: 0.260s std dev: 0.00564s window: 712
+average rate: 7.409
+	min: 0.117s max: 0.260s std dev: 0.00562s window: 720
+average rate: 7.409
+	min: 0.117s max: 0.260s std dev: 0.00559s window: 728
+average rate: 7.409
+	min: 0.117s max: 0.260s std dev: 0.00556s window: 736
+average rate: 7.410
+	min: 0.117s max: 0.260s std dev: 0.00555s window: 744
+
+
+
+
+leobots@leobotsros:~$ ros2 run tf2_tools view_frames
+[INFO] [1787038853.758646403] [view_frames]: Listening to tf data for 5.0 seconds...
+[INFO] [1787038858.846824042] [view_frames]: Generating graph in frames.pdf file...
+[INFO] [1787038858.852337083] [view_frames]: Result:tf2_msgs.srv.FrameGraph_Response(frame_yaml="left_wheel: \n  parent: 'wheel_drop_left'\n  broadcaster: 'default_authority'\n  rate: 10.202\n  most_recent_transform: 1787038858.840110\n  oldest_transform: 1787038853.840878\n  buffer_length: 4.999\nwheel_drop_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10.202\n  most_recent_transform: 1787038858.840110\n  oldest_transform: 1787038853.840878\n  buffer_length: 4.999\nright_wheel: \n  parent: 'wheel_drop_right'\n  broadcaster: 'default_authority'\n  rate: 10.202\n  most_recent_transform: 1787038858.840110\n  oldest_transform: 1787038853.840878\n  buffer_length: 4.999\nwheel_drop_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10.202\n  most_recent_transform: 1787038858.840110\n  oldest_transform: 1787038853.840878\n  buffer_length: 4.999\nbump_front_center: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbump_front_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbump_front_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbump_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbump_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbumper: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbutton_1: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbutton_2: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nbutton_power: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\ncliff_front_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\ncliff_front_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\ncliff_side_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\ncliff_side_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nfront_caster_link: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nimu_link: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_intensity_front_center_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_intensity_front_center_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_intensity_front_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_intensity_front_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_intensity_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_intensity_right: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_intensity_side_left: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nir_omni: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nmouse: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_camera_bracket: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_imu_frame: \n  parent: 'oakd_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_link: \n  parent: 'oakd_camera_bracket'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_left_camera_frame: \n  parent: 'oakd_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_left_camera_optical_frame: \n  parent: 'oakd_left_camera_frame'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_rgb_camera_frame: \n  parent: 'oakd_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_rgb_camera_optical_frame: \n  parent: 'oakd_rgb_camera_frame'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_right_camera_frame: \n  parent: 'oakd_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\noakd_right_camera_optical_frame: \n  parent: 'oakd_right_camera_frame'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\nrplidar_link: \n  parent: 'base_link'\n  broadcaster: 'default_authority'\n  rate: 10000.000\n  most_recent_transform: 0.000000\n  oldest_transform: 0.000000\n  buffer_length: 0.000\n")
+
+
+AUTONOMES FAHREN
+
+
+ros2 topic echo /amcl_pose
+---
+header:
+  stamp:
+    sec: 1787042324
+    nanosec: 177815260
+  frame_id: map
+pose:
+  pose:
+    position:
+      x: -1.8048883632679604
+      y: -1.3466236189748417
+      z: 0.0
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: -0.6454352808566336
+      w: 0.7638149633422473
+  covariance:
+  - 0.04792014587077276
+  - 0.01123016820418199
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.011230168204182434
+  - 0.07502986432036729
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.07663313823553737
+---
+header:
+  stamp:
+    sec: 1787042325
+    nanosec: 225737758
+  frame_id: map
+pose:
+  pose:
+    position:
+      x: -1.7519111686777207
+      y: -1.5975569166174695
+      z: 0.0
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: -0.6371074458836813
+      w: 0.7707750011511609
+  covariance:
+  - 0.058518516952263955
+  - 0.016491723294245197
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.016491723294245197
+  - 0.07673736900279104
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.09192743558112634
+---
+header:
+  stamp:
+    sec: 1787042326
+    nanosec: 385100872
+  frame_id: map
+pose:
+  pose:
+    position:
+      x: -1.7360070308649818
+      y: -1.908160811631295
+      z: 0.0
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: -0.7058042006627301
+      w: 0.7084069665995985
+  covariance:
+  - 0.07991884332508858
+  - 0.028745264453398978
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.028745264453398978
+  - 0.09678766878864309
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.10493173888546921
+---
+
+
+ros2 topic echo /cmd_vel
+---
+linear:
+  x: 0.15052631578947367
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: -0.26315789473684215
+---
+linear:
+  x: 0.025526315789473675
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: -0.10315789473684214
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.05684210526315786
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.21684210526315786
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.36842105263157887
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.26315789473684204
+---
+
+
+leobots@leobotsros:~$ ros2 topic echo /clicked_point
+header:
+  stamp:
+    sec: 1787048137
+    nanosec: 571202546
+  frame_id: map
+point:
+  x: -1.2230149507522583
+  y: -2.389559507369995
+  z: -0.001434326171875
+---
+header:
+  stamp:
+    sec: 1787048143
+    nanosec: 608998841
+  frame_id: map
+point:
+  x: -3.509786367416382
+  y: 0.26601487398147583
+  z: 0.0699462890625
+---
+header:
+  stamp:
+    sec: 1787048148
+    nanosec: 589212038
+  frame_id: map
+point:
+  x: -2.41218900680542
+  y: -1.071899652481079
+  z: -0.001434326171875
+---
+
+
+
+Viereck fahren:
+ros2 run mein_ausweicher turtlebot_shape
+[INFO] [1787055235.350096045] [shape_driver]: Starte Formfahrt in Dauerschleife: square
+[INFO] [1787055235.350516443] [shape_driver]: Mit Strg+C stoppen.
+[INFO] [1787055235.350871947] [shape_driver]: Fahre Viereck...
+[INFO] [1787055235.351236202] [shape_driver]:   Seite 1/4: Geradeaus
+[INFO] [1787055238.861565818] [shape_driver]:   Ecke 1/4: Drehen 90°
+[INFO] [1787055240.968405990] [shape_driver]:   Seite 2/4: Geradeaus
+[INFO] [1787055244.479364864] [shape_driver]:   Ecke 2/4: Drehen 90°
+[INFO] [1787055246.586474703] [shape_driver]:   Seite 3/4: Geradeaus
+[INFO] [1787055250.098822884] [shape_driver]:   Ecke 3/4: Drehen 90°
+[INFO] [1787055252.205497162] [shape_driver]:   Seite 4/4: Geradeaus
+[INFO] [1787055255.717458010] [shape_driver]:   Ecke 4/4: Drehen 90°
+[INFO] [1787055257.824259675] [shape_driver]: Fahre Viereck...
+[INFO] [1787055257.825184446] [shape_driver]:   Seite 1/4: Geradeaus
+[INFO] [1787055261.336827763] [shape_driver]:   Ecke 1/4: Drehen 90°
+[INFO] [1787055263.443458099] [shape_driver]:   Seite 2/4: Geradeaus
+[INFO] [1787055266.954524959] [shape_driver]:   Ecke 2/4: Drehen 90°
+[INFO] [1787055269.061428966] [shape_driver]:   Seite 3/4: Geradeaus
+[INFO] [1787055272.573435719] [shape_driver]:   Ecke 3/4: Drehen 90°
+^C[INFO] [1787055272.997317755] [shape_driver]: Gestoppt.
+Failed to publish log message to rosout: publisher's context is invalid, at ./src/rcl/publisher.c:389
+Traceback (most recent call last):
+  File "/home/leobots/turtle_ws/install/mein_ausweicher/lib/mein_ausweicher/turtlebot_shape", line 33, in <module>
+    sys.exit(load_entry_point('mein-ausweicher', 'console_scripts', 'turtlebot_shape')())
+  File "/home/leobots/turtle_ws/build/mein_ausweicher/mein_ausweicher/turtlebot_shape.py", line 80, in main
+    node = ShapeDriver()
+  File "/home/leobots/turtle_ws/build/mein_ausweicher/mein_ausweicher/turtlebot_shape.py", line 41, in __init__
+    self.stop()
+  File "/home/leobots/turtle_ws/build/mein_ausweicher/mein_ausweicher/turtlebot_shape.py", line 55, in stop
+    self.publisher.publish(msg)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/publisher.py", line 70, in publish
+    self.__publisher.publish(msg)
+rclpy._rclpy_pybind11.RCLError: Failed to publish: publisher's context is invalid, at ./src/rcl/publisher.c:389
+[ros2run]: Process exited with failure 1
+leobots@leobotsros:~/turtle_ws$ 
+
+
+ x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.2
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 1.0
+---
+
+
+
+
+
+
