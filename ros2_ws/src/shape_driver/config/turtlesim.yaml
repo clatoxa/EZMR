@@ -1,0 +1,11 @@
+# Fahrparameter für die Simulation (turtlesim).
+# Einheiten: Strecken in turtlesim-Einheiten (keine Meter), Winkel in rad.
+# Der oberste Schlüssel muss dem Node-Namen entsprechen (hier: shape_driver).
+shape_driver:
+  ros__parameters:
+    cmd_vel_topic: /turtle1/cmd_vel
+    num_sides: 4          # Ganzzahl
+    side_length: 2.0      # Gleitkommazahl -> immer mit ".0" schreiben
+    linear_speed: 1.0     # Einheiten/s
+    angular_speed: 0.5    # rad/s
+    publish_rate: 50.0    # Hz
