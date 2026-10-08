@@ -14,7 +14,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 |---|---|---|
 | 2.1 | ROS-2-Grundlagen, turtlesim | ✔ im Kern abgeschlossen |
 | 2.2 | Eigenes ROS-2-Paket (Fahrfolge in turtlesim) | ✔ Kernaufgabe erfüllt (Paket, Node, Launchfile, Parameterdatei) |
-| 2.3 | ESP32-Roboter über micro-ROS | ⏳ in Arbeit: ESP32 flashbar, micro-ROS-Verbindung ✔; Bewegungsbefehle/Motoren offen |
+| 2.3 | ESP32-Roboter über micro-ROS | ⏳ in Arbeit: micro-ROS-Verbindung, Twist-Empfang und Motorprotokoll ✔; Differentialantrieb und Fahrfigur offen |
 | 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ⏳ |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
 | 2.6 / OTA | FreeRTOS, OTA-Updates | optional, nicht ausgewählt |
@@ -28,9 +28,9 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 3 | Eigenes Paket, Fahrfolge in turtlesim | 2.2 | ✔ |
 | 4 | ESP32 bauen und flashen (ohne micro-ROS) | 2.3 | ✔ |
 | 5 | micro-ROS-Verbindung (Int32-Publisher) | 2.3 | ✔ |
-| 6 | Twist-Subscriber auf dem ESP32, Empfang ohne Motoren | 2.3 | ⏳ als Nächstes |
-| 7 | Motorprotokoll: Einzelbefehle über UART an die ATtiny212 | 2.3 | ⏳ |
-| 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ⏳ |
+| 6 | Twist-Subscriber auf dem ESP32, Empfang ohne Motoren | 2.3 | ✔ |
+| 7 | Motorprotokoll: Einzelbefehle über UART an die ATtiny212 | 2.3 | ✔ (systematisch ermittelt) |
+| 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ⏳ als Nächstes |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ⏳ |
 | 10 | Sensorintegration | 2.4 | ⏳ |
 | 11 | Eigenes Projekt mit Host-Auswertung | 2.4 | ⏳ |
@@ -68,6 +68,23 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | Gerätedatei | `/dev/ttyUSB0` (Gruppe `dialout`) | `ls -l` |
 | Anschluss | USB-C am Board; funktionsfähig nur mit Kabel USB-A → USB-C | Versuch |
 | PlatformIO-Board | `esp32dev` („Espressif ESP32 Dev Module“) | Anleitung 4.1.4 |
+
+**Konvention (ab 07.10.2026):** vorne = Seite mit dem Ultraschallsensor; links/rechts von hinten in Fahrtrichtung gesehen; vorwärts = Bewegung in Richtung Ultraschallsensor.
+
+### Motorprotokoll ATtiny212 (ermittelt in Stufe 7)
+
+| Element | Wert | Grundlage |
+|---|---|---|
+| Schnittstelle | UART, 9600 Baud, 8N1 (Format angenommen), nur TX an GPIO 17 | Anleitung 4.2.2/4.2.3; Versuche |
+| Paket | `0xAA`, `id`, `mode`, `dir`, `param` (6 Byte) | Anleitung 4.2.2, bestätigt |
+| `id` | 1 = linkes Rad, 2 = rechtes Rad, 0 = keine Reaktion | Versuche |
+| `dir` | links: 1 = vorwärts, 0 = rückwärts · rechts: 0 = vorwärts, 1 = rückwärts | Versuche (Motoren spiegelbildlich) |
+| `param` | 16 Bit, Big-Endian (High-Byte zuerst) | Versuch E |
+| `mode 0` | feste Schrittzahl; 2048 Schritte = 1 Radumdrehung; Befehle werden gepuffert und nacheinander ausgeführt, nicht abbrechbar | Versuche A, D, F, G, G2 |
+| `mode 1` | Dauerbetrieb; `param` = Wartezeit pro Schritt in ms (kleiner = schneller); neuer Befehl ersetzt den laufenden sofort | Versuche H3, H4, H6 |
+| Stopp | `mode 1`, `param 0` | Versuch H5 (beide Räder) |
+| Timeout im ATtiny | keiner beobachtet (> 20 s Lauf ohne neuen Befehl) | Versuch H4 |
+| Versorgung | Motoren laufen auch über USB allein | Versuche mit Akku aus |
 
 ---
 
@@ -320,15 +337,159 @@ Grund: Laut aktueller README von `micro_ros_platformio` ist die Standard-Distrib
 
 **Entscheidung:** Ab Stufe 6 Plattform- und Bibliotheksversion in `platformio.ini` festschreiben (`platform = espressif32 @ 7.1.3`, `…/micro_ros_platformio#cfee17f`), damit spätere Builds reproduzierbar bleiben.
 
+### 07.10.2026 – 2.3 Stufe 6: Twist-Subscriber (ohne Motoren)
+
+**Ziel:** Nachweis, dass der ESP32 Bewegungsbefehle (`geometry_msgs/msg/Twist`) auf `/cmd_vel` empfängt – ohne Motoransteuerung.
+
+**Problem:** `Serial` ist als micro-ROS-Transport belegt, empfangene Werte können nicht direkt ausgegeben werden.
+**Lösung:** Jede empfangene Nachricht wird unverändert auf ein zweites Topic `/cmd_vel_echo` zurückgesendet.
+
+```text
+ros2 topic pub /cmd_vel → Agent → ESP32 (Subscriber) → Publisher /cmd_vel_echo → Agent → ros2 topic echo
+```
+
+**Projekt:** `firmware/microros_cmd_vel_test`
+- Node `esp32_cmd_vel_test`; Subscriber `cmd_vel`, Publisher `cmd_vel_echo` (beide `geometry_msgs/Twist`)
+- Executor mit 1 Handle (Subscription, `ON_NEW_DATA`); Callback publiziert die empfangene Nachricht
+- `loop()`: **ohne `delay()`**, `rclc_executor_spin_some(…, 10 ms)` (Folgerung aus der Periodenmessung in Stufe 5)
+- Versionen festgeschrieben: `platform = espressif32 @ 7.1.3`, `micro_ros_platformio#cfee17f` – bestätigt durch `pio pkg list` (`espressif32 @ 7.1.3`, `micro_ros_platformio @ 0.0.1+sha.cfee17f`)
+- Firmware nutzt weder GPIO 17 noch UART2; Akku aus.
+
+**⚠ Zwischenfall:** Nach dem Start des Agents keine Verbindung (`ros2 node list` ohne ESP32-Node, Agent-Log nur `running…`).
+- Ursache: ESP32 startete direkt nach dem Flashen, als noch kein Agent lief → `error_loop()`.
+- Lösung: EN am ESP32 nach dem Agent-Start.
+- Agent-Log danach: `session established`, `participant created`, `topic created`, `subscriber`/`datareader created`, `publisher`/`datawriter created` – entspricht den Initialisierungsschritten in `setup()`.
+
+**Test 6a – Empfang:** `ros2 topic pub --rate 2 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1}, angular: {z: 0.5}}"`
+**Ergebnis ✔:** `ros2 node list` → `/esp32_cmd_vel_test`; `ros2 topic echo /cmd_vel_echo` → `linear.x: 0.1`, `angular.z: 0.5` (identisch mit den gesendeten Werten).
+
+**Test 6b – Durchsatz bei 50 Hz:** `ros2 topic pub --rate 50 /cmd_vel …`; Messung mit `ros2 topic hz /cmd_vel_echo` (Rundreise Host → ESP32 → Host).
+
+| Größe | Stufe 5 (Int32, `delay(100)`) | Stufe 6b (Echo, ohne `delay`) |
+|---|---|---|
+| Sollperiode | 1000 ms | 20 ms |
+| Mittlere Rate | 0,990 Hz | 50,000 Hz |
+| min / max | 907 / 1093 ms | 19 / 21 ms |
+| Standardabweichung | ≈ 90 ms | ≈ 0,17 ms |
+| Stichprobe | 9 Intervalle | 706 Intervalle |
+
+**Interpretation:** Die Verbindung über USB-Seriell trägt 50 Hz stabil; Empfangsrate = Senderate, kein Verlust erkennbar (von `ros2 topic hz` nicht ausdrücklich gezählt, daher nicht streng geprüft). Der Jitter sank von ±90 ms auf ±1 ms – das stützt die Hypothese aus Stufe 5, dass `delay(100)` in `loop()` die Schwankungen verursachte (Vergleich nicht streng, da Aufbau verschieden: Timer vs. Echo).
+
+**Folgerung:** `shape_driver` kann auch auf dem Roboter mit 50 Hz senden.
+
+**Test 6c – eigene Node → ESP32:** `ros2 run shape_driver shape_driver_node --ros-args -p cmd_vel_topic:=/cmd_vel -p publish_rate:=10.0`
+**Ergebnis ✔:** `/cmd_vel_echo` zeigt abwechselnd `linear.x: 1.0` (FORWARD) und `angular.z: 0.5` (TURN), am Ende Nullbefehle → Kette `shape_driver` → `/cmd_vel` → Agent → ESP32 nachgewiesen. (Werte noch aus der turtlesim-Konfiguration; Roboterwerte folgen in Stufe 9.)
+
+### 07.10.2026 – Vorbereitung Stufe 7: Motorprotokoll
+
+**Ausgangslage:** Die Anleitung (4.2.2, 4.2.3) dokumentiert:
+- je ein ATtiny212 pro Motor erzeugt die Schrittfolgen für 28BYJ-48 + ULN2003
+- ESP32 sendet über den zweiten Hardware-UART, nur TX an GPIO 17
+- Paketformat: `START_BYTE 0xAA` (uint8), `id` (uint8), `mode` (uint8), `dir` (uint8), `param` (uint16)
+- `mode 0` = feste Schrittanzahl, `mode 1` = Dauerbetrieb; `param` = Schrittanzahl bzw. Drehgeschwindigkeit
+
+**Nicht dokumentiert** (auch kein Verweis auf ATtiny-Quellcode im Quellenverzeichnis): Baudrate/UART-Format, Motor-IDs, Codierung von `dir`, Byte-Reihenfolge von `param`, Einheit/Wertebereich der Geschwindigkeit, Stoppbefehl, Versorgung der Motoren.
+
+**Hypothese Versorgung:** Die Motoren benötigen vermutlich den eingeschalteten 18650-Akku (Anleitung Tabelle 1 / Abbildung 2: Akku mit Lademodul und An/Aus-Schalter, „Versorgung bis 2 A“). Nicht dokumentiert, in Stufe 7 zu prüfen. Hinweis der Anleitung: beim Einlegen des Akkus Polarität beachten.
+
+**Entscheidung:** Protokolldetails werden systematisch durch Versuche ermittelt; parallel Anfrage an die Betreuung (ATtiny-Quellcode oder funktionierendes Beispiel).
+
+**Geplantes Vorgehen (durchgeführt am 07.10.2026, siehe folgende Einträge):**
+- Eigene Testfirmware ohne micro-ROS: Befehle über den seriellen Monitor eingeben, ESP32 sendet das Paket byteweise (explizite Serialisierung) über GPIO 17 und zeigt die gesendeten Bytes an.
+- Sicherheit: Roboter aufgebockt, Räder frei; zunächst nur `mode 0` (begrenzte Bewegung, endet selbstständig); Not-Aus über den Akkuschalter.
+- `param = 257 (0x0101)` für erste Versuche, da in beiden Byte-Reihenfolgen identisch (umgesetzt mit 1028 = 0x0404).
+- Reihenfolge: (1) Baudrate × ID bis zur ersten Bewegung, (2) ID ↔ linkes/rechtes Rad, (3) `dir`, (4) Byte-Reihenfolge (z. B. 0x0102 vs. 0x0201), (5) `mode 1`: Geschwindigkeit und Stopp.
+- Annahmen: UART-Format 8N1; gemeinsame Masse von ESP32 und ATtiny.
+
+**Sicherheitsstufen für Bewegungstests:**
+
+| Phase | Aufbau |
+|---|---|
+| Stufe 7 | aufgebockt, Räder frei, nicht an der Tischkante |
+| Stufe 8 | aufgebockt; Stopp und Timeout zuerst nachweisen |
+| Stufe 9 | Bodenfahrt erst nach nachgewiesenem Timeout-Stopp; ausreichend langes Kabel oder WLAN-Transport |
+
+### 07.10.2026 – 2.3 Stufe 7a: Testkonsole Motorprotokoll
+
+**Projekt:** `firmware/motor_protocol_test` (ohne micro-ROS; `Serial` = Eingabekonsole, `monitor_filters = send_on_enter`, `monitor_echo = yes`). UART2 an GPIO 17 (TX), RX-Pin 16 nur formal; Start mit 9600 Baud. Explizite byteweise Serialisierung, Byte-Reihenfolge von `param` umschaltbar, Senden nur auf Befehl. Befehle: `send`, `baud`, `order le|be`, `raw`, `status`, `help` (später `stop`).
+
+**Trockentest (Akku aus):** TX-Bytes entsprechen den Befehlen (z. B. `send 1 0 0 1028` → `AA 01 00 00 04 04`; `order be` + `send 1 0 0 258` → `… 01 02`).
+
+**⚠ Auffälligkeit 1:** `order le` + `send 1 0 0 258` ergab `… 03 01` (259).
+- Prüfung: Firmware meldet empfangene Zeile zurück (`RX: '…'`); 16 Wiederholungen fehlerfrei.
+- Zunächst als Tippfehler gewertet.
+
+**⚠ Auffälligkeit 2:** `send 1 0 0 1028` wurde abgelehnt, obwohl `RX` scheinbar exakt den richtigen Text zeigte.
+- Ursache (wahrscheinlich): Backspace-Zeichen wurden in den Zeilenpuffer übernommen; das Terminal führte sie bei der `RX`-Ausgabe aus, sodass die Zeile korrekt aussah. Erklärt vermutlich auch Auffälligkeit 1.
+- Risiko: falscher `param` bei korrekt aussehender Anzeige.
+- Lösung: Backspace wird im Puffer verarbeitet; Zeilen mit Steuer- oder Nicht-ASCII-Zeichen werden verworfen.
+- Test ✔: Eingabe `1029` → Backspace → `8` ergibt `RX: 'send 1 0 0 1028'`, `TX … 04 04`.
+
+### 07.10.2026 – 2.3 Stufe 7b: Ermittlung des Motorprotokolls
+
+**Aufbau:** Roboter aufgebockt, Räder frei, Klebeband-Markierung an den Rädern; Akku aus (Versorgung über USB). Beobachtung per Sichtprüfung, Zeitmessung per Handstoppuhr.
+
+**Hinweis Seitenzuordnung:** Die Versuche A–D wurden zunächst ohne festgelegte Blickrichtung protokolliert (vermutlich Blick von vorne) – links/rechts waren dadurch vertauscht. Nach Festlegung der Konvention (vorne = Ultraschallsensor, Blick von hinten) wurde kontrolliert: `send 1 0 1 1028` → links vorwärts; `send 2 0 0 1028` → rechts vorwärts. Die folgenden Angaben sind korrigiert.
+
+| Versuch | Befehl(e) | Beobachtung | Ergebnis |
+|---|---|---|---|
+| A | `send 1 0 0 1028` @ 9600, mehrfach | ein Rad (links) dreht, jedes Mal gleich weit, endet selbstständig | Baudrate 9600; mode 0 wiederholbar |
+| B | `send 0/2 0 0 1028` | ID 0: keine Reaktion; ID 2: anderes Rad (rechts) | ID 1 = links, ID 2 = rechts |
+| C | `dir 1` statt `dir 0` | entgegengesetzte Drehrichtung | `dir` bestimmt Richtung |
+| D | `send 1 0 0 2056` (0x0808) | doppelter Winkel gegenüber 1028 | Winkel ∝ Schrittzahl |
+| E | Referenz `1028`; `order le`+`260` (`04 01`); `order be`+`260` (`01 04`) | Referenz: ½ Umdrehung; `04 01`: ½ Umdrehung; `01 04`: ≈ ¼ der Referenz | `param` Big-Endian |
+| F | `send 1 0 0 2048` (be) | genau eine Umdrehung | 2048 Schritte/Umdrehung |
+| G | `send 1 0 0 4112` (≈ 2 U.), währenddessen `send 1 0 0 0` | beide Umdrehungen laufen zu Ende | mode 0 nicht abbrechbar |
+| G2 | `send 1 0 0 4112`, währenddessen `send 1 0 0 1028` | danach weitere ½ Umdrehung | mode-0-Befehle werden gepuffert |
+| Richtung | `dir 0`/`dir 1` je Rad, Konvention s. o. | links: dir 1 vorwärts; rechts: dir 0 vorwärts | Motoren spiegelbildlich |
+| H1/H3 | `send 1 1 1 257`, `… 10`, `… 5`, `… 2` | 257: LEDs der ULN2003-Platine blinken sichtbar nacheinander; 10: sehr schnelles Blinken; 5: langsame, 2: schnellere Drehung | kleinerer `param` = schneller |
+| H5 | `send 1 1 1 5`, dann `send 1 1 1 0`; rechts: `send 2 1 0 5`, dann `send 2 1 0 0` | stoppt jeweils sofort | Stopp = mode 1, param 0 |
+| H6 | `send 1 1 1 5`, währenddessen `send 1 1 1 2` | sofortiger Wechsel auf höhere Drehzahl | mode-1-Befehle ersetzen sofort |
+
+**Versuch H4 – Zeitmessung `mode 1` (linkes Rad, `dir 1`, Handstoppuhr):**
+
+| `param` | Messung | s/Umdrehung | erwartet (2048 × param ms) | Abweichung | Schrittperiode |
+|---|---|---|---|---|---|
+| 2 | 3 U. in 12,42 s | 4,14 | 4,10 | +1,1 % | 2,02 ms |
+| 5 | 2 U. in 20,76 s | 10,38 | 10,24 | +1,4 % | 5,07 ms |
+| 10 | 1 U. in 20,57 s | 20,57 | 20,48 | +0,4 % | 10,04 ms |
+
+**Ergebnis:** In `mode 1` ist `param` die Wartezeit pro Schritt in ms (Schrittrate = 1000 / `param`). Abweichungen < 1,5 %, durchweg positiv – vermutlich Handstoppung und ggf. Zeitbedarf pro Schritt im ATtiny (nicht getrennt geprüft). Höchste geprüfte Drehzahl: `param 2` ≈ 0,24 U/s; `param 1` ungetestet. Mögliche Drehzahlen sind grob gestuft (1000, 500, 333, 250, 200 … Schritte/s).
+
+**Beobachtung Timeout:** Im Dauerbetrieb lief der Motor > 20 s ohne neuen Befehl → im ATtiny kein (kürzerer) Timeout; ein Stopp bei Verbindungsverlust muss vom ESP32 ausgehen.
+
+**⚠ Hypothese widerlegt – Versorgung:** Alle Versuche liefen bei ausgeschaltetem Akku. Die Motoren werden auch über USB versorgt. Folgerung: Not-Aus = USB-Kabel trennen (Akkuschalter allein unwirksam, solange USB steckt). Auf Brownout-Neustarts achten (erneute Startmeldung), besonders bei zwei laufenden Motoren – bisher nicht beobachtet.
+
+**⚠ Zwischenfall – lang anhaltende Bewegung:** Tippfehler `send 1 0 0 2026` (statt 2056) → Rad dreht lang anhaltend; gestoppt durch Trennen des USB-Kabels (Akku aus). Erklärung: 2026 = 0x07EA wurde mit Low-Byte zuerst gesendet (`EA 07`), der ATtiny liest Big-Endian → 0xEA07 = 59.911 Schritte (≈ 29 Umdrehungen). Der Zwischenfall lieferte den ersten Hinweis auf die Byte-Reihenfolge (später in Versuch E bestätigt).
+
+**Gegenmaßnahmen in der Konsole:**
+- Grenze 4200 für `param`, geprüft in **beiden** Byte-Lesarten (verhindert Fehler dieser Art auch bei falscher Reihenfolge)
+- zunächst nur `mode 0`, nach Ermittlung des Stopps `mode 0/1`; `dir` nur 0/1
+- `raw` nur als vollständiges, geprüftes 6-Byte-Paket
+- Prüfung ✔: `send 1 0 0 2026`, `send 1 1 0 100` (vor Freigabe), `send 1 0 2 100`, `raw AA 01 00 00 EA 07`, `raw AA 01 00 00 04` → jeweils abgelehnt
+- Standard der Byte-Reihenfolge auf Big-Endian umgestellt; Befehl `stop` (beide Räder mode 1, param 0) ergänzt; Kopfkommentar mit allen ermittelten Werten
+
+**Bewertung:** Alle Werte beruhen auf Versuchen mit Sichtprüfung bzw. Handstoppung an frei drehenden Rädern. Unter Last (Bodenfahrt) können Schrittverluste auftreten; das ist in Stufe 8/9 zu prüfen. Die Anfrage an die Betreuung zum ATtiny-Quellcode bleibt zum Abgleich sinnvoll.
+
+**Folgerungen für Stufe 8:**
+1. Fahrbetrieb ausschließlich mit `mode 1` (sofortige Änderung und Stopp möglich).
+2. Umrechnung `Twist` → Radgeschwindigkeit → Raddrehzahl → `param` (ms/Schritt); dafür Raddurchmesser und Spurweite messen.
+3. Grobe Drehzahlstufen → sinnvolles Runden; Mindestwert für `param` festlegen.
+4. Richtungszuordnung je Rad (links vorwärts `dir 1`, rechts vorwärts `dir 0`).
+5. Timeout im ESP32: ohne neuen `Twist` (z. B. 0,5 s) beide Räder stoppen.
+
 ---
 
 ## Offene Punkte
 
 **Technisch**
-- [ ] Stufe 6: Twist-Subscriber auf dem ESP32 (Empfang ohne Motoren nachweisen)
-- [ ] Gegenprobe Int32-Publisher mit `delay(10)`, längere Messung (≥ 60 Intervalle)
-- [ ] Versionen in `platformio.ini` festschreiben und mit `pio pkg list` prüfen (`sha.cfee17f`)
-- [ ] Motorprotokoll klären (Voraussetzung für Stufe 7): UART-Baudrate, Motor-IDs, Codierung der Drehrichtung, Byte-Reihenfolge des 16-Bit-Parameters, Geschwindigkeitseinheit, gültiger Stoppbefehl → Quellcode der ATtiny-Controller oder funktionierendes Beispiel bei Betreuung erfragen
+- [ ] Stufe 8: Raddurchmesser und Spurweite messen
+- [ ] Stufe 8: Differentialkinematik und Umrechnung in `param` (ms/Schritt) inkl. Rundung und Mindestwert
+- [ ] Stufe 8: Timeout-Stopp im ESP32 (keine Befehle → Motoren stoppen) – Voraussetzung für Bodenfahrt
+- [ ] `param 1` (schnellste Stufe) und Verhalten unter Last prüfen (Schrittverluste?)
+- [ ] Verhalten mit Akku an und USB gleichzeitig klären (Versorgung, Wirkung des Akkuschalters)
+- [ ] Anfrage an Betreuung zum ATtiny-Protokoll versenden / Antwort mit Versuchsergebnissen abgleichen
+- [ ] Optional: Gegenprobe Int32-Publisher mit `delay(10)` (durch Stufe 6b bereits stark gestützt)
 - [ ] Ursache der verfälschten Boot-ROM-Ausgabe (derzeit ohne Auswirkung)
 
 **Dokumentation / Repository**
