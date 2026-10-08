@@ -15,9 +15,10 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 2.1 | ROS-2-Grundlagen, turtlesim | ✔ im Kern abgeschlossen |
 | 2.2 | Eigenes ROS-2-Paket (Fahrfolge in turtlesim) | ✔ Kernaufgabe erfüllt (Paket, Node, Launchfile, Parameterdatei) |
 | 2.3 | ESP32-Roboter über micro-ROS | ✔ Kernaufgabe erfüllt: `shape_driver` fährt das Viereck auf dem realen Roboter (micro-ROS über WLAN, Akku) |
-| 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ✔ Ultraschall-Hinderniserkennung mit Sicherheitsfilter, Reaktionszeitmessung und akustischer Abstandswarnung (Stufe 10a–d) · Abgleich mit den Anforderungen der Anleitung ⏳ |
+| 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ✔ Ultraschall-Hinderniserkennung mit Sicherheitsfilter, Reaktionszeitmessung und akustischer Abstandswarnung (Stufe 10a–d) · Anforderungen von 2.4 erfüllt (Abgleich 08.10.2026) · Erweiterung Display (Stufe 11) |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
-| 2.6 / OTA | FreeRTOS, OTA-Updates | optional, nicht ausgewählt |
+| 2.6 | FreeRTOS (optional) | ⏳ teilweise: Display-Task auf Kern 0, Mutex, Task-Notification, Laufzeitmessung (Stufe 11); Interrupt/Semaphore mit Bumper offen |
+| OTA | OTA-Updates (optional) | nicht ausgewählt |
 
 ### Stufenplan
 
@@ -33,7 +34,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
 | 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
-| 11 | Eigenes Projekt mit Host-Auswertung | 2.4 | ⏳ |
+| 11 | Erweiterung: OLED-Display mit FreeRTOS-Task (2.6), Bumper | 2.4 / 2.6 | ✔ 11a–d Display und Laufzeitvergleich · ⏳ v5.1, Grundlast, Bumper |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
 ---
@@ -118,6 +119,16 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | Anschluss | GPIO 4 | Anleitung 4.2.3, Tabelle 2; funktionsfähig |
 | Ansteuerung | Arduino `tone()` / `noTone()` (LEDC), 2000 Hz | Firmware v4; Frequenz angenommen, nicht optimiert |
 | Versorgung | funktioniert auch über USB allein | Versuch 10d |
+
+### Weitere Komponenten (Erkundung 08.10.2026, Testprogramm `firmware/hw_probe`)
+
+| Komponente | Befund | Grundlage |
+|---|---|---|
+| I²C-Bus (GPIO 21/22) | antwortende Adressen: **0x3C**, **0x68** | I²C-Scan |
+| OLED-Display | Modul „JMD0.96D-1“, 128×64, Lötbrücke „0x78“ (8 Bit) = **0x3C**; Controller **SSD1306** (Annahme, durch Testbild bestätigt) | Foto, Scan, Stufe 11a |
+| IMU | Modul beschriftet „MPU-92.65“, antwortet auf **0x68**; nicht weiter genutzt | Foto, Scan |
+| APDS-9960 | antwortet nicht (0x39 fehlt), auf dem Foto nicht erkennbar → vermutlich nicht bestückt | Scan |
+| Bumper | Steckerleisten **JP3/JP4** (dreipolig, ohne Pinbeschriftung) vermutlich zugehörig; Kabel rot/schwarz/grün (Belegung unbekannt). Ohne Bumper lesen GPIO 12 und 14 auch mit internem Pull-up LOW → vermutlich externer Pull-down auf der Platine (Hypothese). Nicht eingesteckt, Pinbelegung erst mit Multimeter klären (Kurzschlussgefahr bei Verpolung). | `hw_probe`, Foto |
 
 ---
 
@@ -797,14 +808,91 @@ E0→E1: 2,7–5,4 ms (abhängig von der Güte des Uhrenabgleichs, nur unter Vor
 
 **Ergebnis ✔:** Akustische Abstandswarnung mit Auswertung auf dem Host und lokaler Tonerzeugung auf dem ESP32; arbeitet synchron mit dem Sicherheitsfilter.
 
+**Nachtrag (Stufe 11b):** Die LEDC-Meldung erscheint reproduzierbar ≈ 320 ms nach dem Start (`ledc_set_duty … LEDC is not initialized`) → ausgelöst durch `noTone()` in `setup()` ohne vorherigen Ton (Vermutung bestätigt). Harmlos; Korrektur in v5.1 (Pin als Ausgang auf LOW statt `noTone()`).
+
+### 08.10.2026 – Abgleich mit Abschnitt 2.4 der Anleitung
+
+Anforderung: mindestens ein Sensor, kleines Projekt; ESP32 erfasst und publiziert; Auswertung auf dem Host; Dokumentation von Aufbau, Funktionsweise und Herausforderungen.
+Stand: HC-SR04 → `/range` (ESP32) → `obstacle_stop`, `distance_warner`, Latenzanalyse (Host) ✔; Dokumentation im Protokoll, Übertrag in den Beleg offen.
+**Ergebnis:** Pflicht aus 2.4 erfüllt. Weitere Komponenten sind freiwillige Erweiterung (Abschnitt 3 der Anleitung legt den Schwerpunkt auf die eigenen Sensoranwendungen). Entscheidung: Display und Bumper einbinden, dabei FreeRTOS (2.6, optional) einbeziehen.
+
+### 08.10.2026 – Stufe 11a: Inbetriebnahme OLED-Display, Übertragungszeit
+
+**Umsetzung:** Testprogramm `firmware/display_test` (ohne micro-ROS), Bibliothek U8g2 (`olikraus/U8g2 @ ^2.35.0`, unterstützt SSD1306 und SH1106), Vollbildpuffer im RAM. Gemessen mit `micros()`: Zeichnen in den Puffer und Übertragung des ganzen Bildes (1024 Byte), je 40 Bilder abwechselnd bei 100 kHz und 400 kHz I²C-Takt.
+
+**Ergebnis:** Testbild korrekt (Rahmen, Text, Zähler, Balken) → **SSD1306 bestätigt**, Einbaulage passt (keine Drehung nötig).
+
+| I²C-Takt | Zeichnen | Übertragung (Mittel) | min–max |
+|---|---|---|---|
+| 100 kHz | ≈ 1,3 ms | **113,1 ms** | 113,0–113,1 ms |
+| 400 kHz | ≈ 1,3 ms | **31,9 ms** | 31,8–32,0 ms |
+
+**Interpretation:** Vierfacher Takt ergibt nur 3,5-fach kürzere Übertragung. Aus beiden Messpunkten geschätzt: t ≈ 4,8 ms fest + ≈ 10 800 Bitzeiten (≈ 1200 Byte statt 1024 → Adress-/Steuerbytes, Pausen im Treiber). Übertragung sehr gleichmäßig (±0,1 ms). Folge: Ein Bild blockiert selbst bei 400 kHz 32 ms – zu viel für `loop()` mit 50-ms-Regeltakt → eigene Task.
+Anstieg Zeichnen 1265 → 1305 µs vermutlich durch vierstelligen Zähler (nicht geprüft). U8g2-Version noch nicht notiert.
+
+### 08.10.2026 – Stufe 11b/c: Firmware v5 – Display-Task (FreeRTOS), Host-Zustand
+
+**Aufbau:**
+
+```
+Kern 1: loop()                                  Kern 0: displayTask (Priorität 1, 4 KB Stack)
+ ├─ micro-ROS (einziger Nutzer)                  │  ulTaskNotifyTake(…, 250 ms): blockiert ohne CPU-Last
+ ├─ Regelschritt 50 ms, Ultraschall, Buzzer      │  ↑ geweckt durch Ereignis oder Zeitablauf
+ ├─ Callbacks schreiben ──► dispData ◄── Mutex ──┤  kopiert dispData (kurz unter Mutex)
+ └─ /robot_state ändert sich ─► xTaskNotifyGive ─┘  zeichnet + überträgt (≈ 32 ms, ohne Mutex)
+```
+
+| 2.6-Konzept | Umsetzung |
+|---|---|
+| Task-Verwaltung | `xTaskCreatePinnedToCore(displayTask, …, Kern 0)`; `loop()` auf Kern 1 (Startmeldung bestätigt) |
+| Ressourcenschutz | `xSemaphoreCreateMutex()` für die gemeinsamen Anzeigedaten; Mutex nur zum Kopieren, nie während der Übertragung; Wartezeit beim Schreiben begrenzt (2 ms). I²C nutzt nur die Display-Task → kein Bus-Mutex nötig |
+| Ereignissteuerung | Zustandswechsel vom Host → `xTaskNotifyGive()` weckt die Task sofort; sonst 4 Hz |
+| Zuständigkeit | micro-ROS nur aus `loop()` (nicht für mehrere Tasks ausgelegt) |
+
+**Host:** `obstacle_stop` veröffentlicht zusätzlich `/robot_state` (`std_msgs/UInt8`: 1 FREI, 2 HINDERNIS, 3 keine Sensordaten), bei Wechsel sofort, sonst alle 0,2 s. Die Auswertung bleibt auf dem Host, der ESP32 zeigt nur an.
+**Anzeige:** Abstand · Host-Zustand (HINDERNIS eingerahmt; ohne Nachricht > 1,5 s „--“) · Warnstufe · Radbefehle · Laufzeitdiagnose.
+**Diagnose:** `/loop_diag` (`geometry_msgs/Vector3`) jede Sekunde: x = längster `loop()`-Durchlauf, y/z = größter/kleinster Abstand zwischen Regelschritten [µs]. Executor mit 3 Subscribern, 3 Publisher – micro-ROS-Standardgrenzen reichen.
+
+**⚠ Fehler und Lösungen:**
+- `platformio.ini`: Zwei Bibliotheken versehentlich in einer Zeile bzw. micro-ROS-Zeile doppelt → je Bibliothek eine eingerückte Zeile.
+- Vorgegebene `grep`-Erwartungswerte zur Kontrolle der Kopien zu niedrig (Treffer in Kommentaren nicht mitgezählt) → an den Quelldateien nachgezählt, Kopien waren korrekt.
+- Nach einem Upload blieb „warte auf Agent ...“ stehen; nach EN lief alles. Ursache nicht gesichert (vermutlich Verbindung beim ersten Start fehlgeschlagen → Fehlerschleife). Verbesserung v5.1: Fehleranzeige auf dem Display.
+
+**Tests:** Statusanzeige erscheint nach dem Start ✔. Mit `obstacle_stop`: Hand < 20 cm → „Host: HINDERNIS“ mit Rahmen, ohne Hand → „FREI“ (Hysterese 0,27–0,30 m), ohne wahrnehmbare Verzögerung ✔ (nicht zeitlich gemessen).
+
+### 08.10.2026 – Stufe 11d: Laufzeitvergleich Display aus / Task / in `loop()`
+
+**Methode:** Schalter `DISPLAY_MODE` (0 = nur Startbild, 1 = eigene Task, 2 = direkt in `loop()` alle 250 ms), gesetzt per `PLATFORMIO_BUILD_FLAGS="-DDISPLAY_MODE=n"`, Variante über die Startmeldung kontrolliert. Je 60 s `/loop_diag` mit `tools/loop_diag_stats.py` (erster Wert verworfen). Gleiche Bedingungen: WLAN, USB-Versorgung, Roboter steht, keine Host-Nodes (kein `/robot_state` → Anzeige „Host: --“, beabsichtigt).
+
+| Kennwert | Modus 0 (aus) | Modus 1 (Task) | Modus 2 (in `loop()`) |
+|---|---|---|---|
+| `loop()` max/s, Median | 35,8 ms | 35,9 ms | **66,3 ms** |
+| `loop()` max/s, 90 % | 65,7 ms | 65,9 ms | **150,7 ms** |
+| `loop()` max/s, Höchstwert | 120,7 ms | 106,8 ms | **573,9 ms** |
+| Regelabstand max/s, Median (Soll 50 ms) | 59,0 ms | 62,0 ms | **90,0 ms** |
+| Regelabstand max/s, 90 % | 74,0 ms | 78,0 ms | **165,0 ms** |
+| Sekunden mit Regelabstand > 55 ms | 51/59 | 55/58 | 58/58 |
+
+Vorab-Messreihe Modus 1 (21 s, mit laufendem `obstacle_stop`): `loop()` Median ≈ 38 ms, max 170 ms; Regelabstand Median ≈ 62 ms.
+
+**Interpretation:**
+- Modus 1 ≈ Modus 0: Die Display-Task auf Kern 0 belastet die Regelschleife **nicht messbar** (Unterschied kleiner als die Streuung zwischen zwei Messungen) → Aufteilung auf zwei Kerne erfüllt ihren Zweck.
+- Modus 2 verlängert den typischen längsten Durchlauf um ≈ 30 ms – passend zur Übertragungszeit aus 11a.
+- **Kritisch in Modus 2:** Höchstwert 574 ms > Motor-Timeout 500 ms → während einer Fahrt hätte der ESP32 trotz laufender Fahrbefehle gestoppt. Ursache der Verstärkung über 32 ms hinaus nicht untersucht (Hypothese: Überlagerung mit WLAN-Verzögerungen).
+- **Grundlast ohne Display:** längster Durchlauf im Median ≈ 36 ms, bis 120 ms; Regelabstand fast jede Sekunde > 55 ms. Ursache offen (Hypothese: reliable-Publisher warten auf Bestätigung über WLAN, `spin_some`). War in Stufe 9/10 nicht gemessen; 10c (E3→E4 ≤ 52 ms) spricht eher gegen so lange Blockaden, ist aber kein Nachweis.
+- Kleinste Regelabstände (15–42 ms) entstehen durch das Aufholen nach Verspätungen (`lastControlMs += 50`).
+
 ---
 
 ## Offene Punkte
 
 **Technisch**
-- [ ] Anforderungen von Abschnitt 2.4 der Anleitung mit Stufe 10 abgleichen; klären, ob Stufe 11 nötig ist
+- [ ] Firmware v5.1: Fehleranzeige auf dem Display bei fehlendem Agent; Buzzer-Pin beim Start als Ausgang LOW statt `noTone()`; Startbild in Modus 0 eindeutig beschriften
+- [ ] Grundlast der Schleife (≈ 36 ms Median, bis 120 ms ohne Display) untersuchen: zuerst best-effort-Publisher für `/range`, `/wheel_cmd`, dann ggf. serieller Transport zum Vergleich – je nur eine Änderung
+- [ ] Bumper: Pinbelegung JP3/JP4 mit Multimeter klären (VCC/GND/Signal, Zuordnung GPIO 12/14), dann Erfassung auf dem ESP32 + Auswertung in `obstacle_stop`; 2.6 Punkt 3: Interrupt → Semaphore → Alarm-Task
+- [ ] U8g2-Version notieren (`pio pkg list`)
 - [ ] Buzzer: Dauerton-Stufe (< 0,10 m) über `distance_warner` nachweisen
-- [ ] Buzzer: Ursache der LEDC-Meldung klären; ggf. LEDC direkt statt `tone()` ansteuern
+- [x] Buzzer: Ursache der LEDC-Meldung geklärt (`noTone()` ohne vorherigen Ton in `setup()`), Korrektur in v5.1
 - [ ] Buzzer: Tonfrequenz an die Resonanz des Piezos anpassen (Lautstärke) – optional
 - [ ] `distance_warner`: Hysterese gegen Flattern an Stufengrenzen – optional
 - [ ] `obstacle_stop`: sofortiger Nullbefehl bei Sperre (−0…50 ms Reaktionszeit) – optional
@@ -839,4 +927,5 @@ E0→E1: 2,7–5,4 ms (abhängig von der Güte des Uhrenabgleichs, nur unter Vor
 - micro_ros_platformio: https://github.com/micro-ROS/micro_ros_platformio
 - PlatformIO – udev rules: https://docs.platformio.org/en/latest/core/installation/udev-rules.html
 - PlatformIO – Install Shell Commands: https://docs.platformio.org/en/latest/core/installation/shell-commands.html
+- U8g2 (Bibliothek für monochrome Displays): https://github.com/olikraus/u8g2
 - REP 117 – Informational Distance Measurements (Sonderwerte inf/−inf/nan): https://www.ros.org/reps/rep-0117.html

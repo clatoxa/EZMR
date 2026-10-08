@@ -12,6 +12,18 @@
 // Stufe 10d: passiver Piezo-Buzzer (GPIO 4 laut Anleitung 4.2.3). Subscriber /buzzer (std_msgs/UInt16):
 //   0 = aus, 1 = Dauerton, >= 2 = Pieptakt in ms (Periode, 50 % an); kleinere Werte als 100 -> 100.
 //   Ohne neue Nachricht für BUZZER_TIMEOUT_MS -> aus. Tonerzeugung lokal und nicht blockierend.
+// Stufe 11 (Anleitung 2.6, FreeRTOS): OLED-Display SSD1306 (I2C 0x3C, GPIO 21/22, 400 kHz).
+//   Eigene Task auf Kern 0 (loop() läuft auf Kern 1). Die Task besitzt den I2C-Bus allein.
+//   Gemeinsame Anzeigedaten sind durch einen Mutex geschützt; die Task kopiert sie unter dem Mutex
+//   und zeichnet/überträgt danach OHNE Mutex (Übertragung ca. 32 ms, gemessen in Stufe 11a).
+//   Ereignissteuerung: Zustandswechsel vom Host weckt die Task sofort (Task-Notification),
+//   sonst Aktualisierung alle DISPLAY_PERIOD_MS.
+//   micro-ROS wird ausschließlich aus loop() verwendet (nicht für mehrere Tasks ausgelegt).
+//   Subscriber /robot_state (std_msgs/UInt8, von obstacle_stop): 1 = FREI, 2 = HINDERNIS, 3 = keine Sensordaten.
+//   Messung (Stufe 11d): Publisher /loop_diag (geometry_msgs/Vector3) jede Sekunde:
+//     x = längster loop()-Durchlauf [us], y = größter / z = kleinster Abstand zwischen Regelschritten [us].
+//   DISPLAY_MODE (Vergleich Stufe 11d): 0 = Display nach dem Startbild nicht aktualisiert (Grundlinie),
+//                                       1 = eigene FreeRTOS-Task (Standard), 2 = direkt in loop().
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -25,6 +37,9 @@
 #include <geometry_msgs/msg/vector3.h>
 #include <sensor_msgs/msg/range.h>
 #include <std_msgs/msg/u_int16.h>
+#include <std_msgs/msg/u_int8.h>
+#include <Wire.h>
+#include <U8g2lib.h>
 #include <rmw_microros/rmw_microros.h>
 
 #if defined(MICRO_ROS_TRANSPORT_ARDUINO_WIFI)
@@ -83,6 +98,20 @@ static const uint32_t BUZZER_FREQ_HZ        = 2000;   // Annahme; Resonanz des P
 static const uint32_t BUZZER_TIMEOUT_MS     = 1000;   // ohne neue Nachricht -> aus
 static const uint16_t BUZZER_PERIOD_MIN_MS  = 100;
 
+// ---------- Display (Stufe 11) ----------
+#ifndef DISPLAY_MODE
+#define DISPLAY_MODE 1                                // 0 = aus (Grundlinie), 1 = Task, 2 = in loop()
+#endif
+#define DISPLAY_IN_TASK (DISPLAY_MODE == 1)
+#define DISPLAY_IN_LOOP (DISPLAY_MODE == 2)
+static const int      I2C_SDA_PIN           = 21;     // Anleitung 4.2.3
+static const int      I2C_SCL_PIN           = 22;
+static const uint8_t  DISPLAY_ADDR_7BIT     = 0x3C;   // I2C-Scan + Lötbrücke "0x78"
+static const uint32_t DISPLAY_BUS_HZ        = 400000; // Stufe 11a: ca. 32 ms pro Bild (100 kHz: ca. 113 ms)
+static const uint32_t DISPLAY_PERIOD_MS     = 250;    // Aktualisierung ohne Ereignis (4 Hz)
+static const uint32_t ROBOT_STATE_TIMEOUT_MS = 1500;  // ohne /robot_state -> "Host: --"
+static const uint32_t DIAG_PERIOD_MS        = 1000;
+
 struct WheelCmd {
   uint8_t dir;
   uint16_t param;   // 0 = Stopp
@@ -98,6 +127,10 @@ sensor_msgs__msg__Range range_msg;
 static char range_frame_id[] = "ultrasonic_link";
 rcl_subscription_t buzzer_sub;
 std_msgs__msg__UInt16 buzzer_msg;
+rcl_subscription_t state_sub;
+std_msgs__msg__UInt8 state_msg;
+rcl_publisher_t diag_pub;
+geometry_msgs__msg__Vector3 diag_msg;
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -131,6 +164,31 @@ uint32_t lastBuzzerMs = 0;
 bool buzzerReceived = false;
 uint32_t buzzerPhaseStartMs = 0;  // Beginn des Pieptakts (für gleichmäßiges Muster)
 bool buzzerOn = false;
+
+// ---------- Anzeige (gemeinsame Daten loop() <-> Display-Task) ----------
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+
+struct DisplayData {
+  float    rangeM;          // letzter Messwert (inf/-inf/nan möglich)
+  uint8_t  hostState;       // 0 = unbekannt, 1 = FREI, 2 = HINDERNIS, 3 = keine Sensordaten
+  uint32_t hostStateMs;     // Empfangszeit des Zustands
+  uint16_t buzzerPeriod;    // 0 aus, 1 Dauerton, sonst ms
+  int16_t  wheelLeft;       // vorzeichenbehafteter param
+  int16_t  wheelRight;
+  bool     cmdTimedOut;
+  uint32_t loopMaxUs;       // aus der letzten Diagnoseperiode
+  uint32_t ctrlMaxUs;
+};
+DisplayData dispData = {NAN, 0, 0, 0, 0, 0, true, 0, 0};
+SemaphoreHandle_t dispMutex = NULL;   // schützt dispData
+TaskHandle_t displayTaskHandle = NULL;
+
+// Diagnose (nur in loop() benutzt)
+uint32_t diagLoopMaxUs = 0;
+uint32_t diagCtrlMaxUs = 0;
+uint32_t diagCtrlMinUs = UINT32_MAX;
+uint32_t lastCtrlUs = 0;
+uint32_t lastDiagMs = 0;
 
 // ---------- Motor-UART ----------
 void sendMotorFrame(uint8_t id, uint8_t mode, uint8_t dir, uint16_t param) {
@@ -241,6 +299,12 @@ void controlStep() {
   wheel_cmd_msg.x = signedParam(l, DIR_FWD_LEFT);
   wheel_cmd_msg.y = signedParam(r, DIR_FWD_RIGHT);
   wheel_cmd_msg.z = timedOut ? 1.0 : 0.0;
+  if (xSemaphoreTake(dispMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    dispData.wheelLeft = (int16_t)wheel_cmd_msg.x;
+    dispData.wheelRight = (int16_t)wheel_cmd_msg.y;
+    dispData.cmdTimedOut = timedOut;
+    xSemaphoreGive(dispMutex);
+  }
   RCSOFTCHECK(rcl_publish(&wheel_cmd_pub, &wheel_cmd_msg, NULL));
 }
 
@@ -264,6 +328,10 @@ void publishRange(float rangeM) {
     range_msg.header.stamp.nanosec = (uint32_t)(ns % 1000000000LL);
   }
   range_msg.range = rangeM;
+  if (xSemaphoreTake(dispMutex, pdMS_TO_TICKS(2)) == pdTRUE) {   // kurz halten, nie lange warten
+    dispData.rangeM = rangeM;
+    xSemaphoreGive(dispMutex);
+  }
   RCSOFTCHECK(rcl_publish(&range_pub, &range_msg, NULL));
 }
 
@@ -332,6 +400,10 @@ void buzzer_callback(const void *msgin) {
     buzzerPhaseStartMs = millis();          // neues Muster beginnt mit "an"
   }
   buzzerPeriodMs = msg->data;
+  if (xSemaphoreTake(dispMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    dispData.buzzerPeriod = msg->data;
+    xSemaphoreGive(dispMutex);
+  }
   lastBuzzerMs = millis();
   buzzerReceived = true;
 }
@@ -355,6 +427,114 @@ void buzzerStep() {
     p = BUZZER_PERIOD_MIN_MS;
   }
   setBuzzer((now - buzzerPhaseStartMs) % p < p / 2);
+}
+
+// /robot_state vom Host (obstacle_stop): Zustandswechsel weckt die Display-Task sofort
+void state_callback(const void *msgin) {
+  const std_msgs__msg__UInt8 *msg = (const std_msgs__msg__UInt8 *)msgin;
+  bool changed = false;
+  if (xSemaphoreTake(dispMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    changed = (dispData.hostState != msg->data);
+    dispData.hostState = msg->data;
+    dispData.hostStateMs = millis();
+    xSemaphoreGive(dispMutex);
+  }
+#if DISPLAY_IN_TASK
+  if (changed && displayTaskHandle != NULL) {
+    xTaskNotifyGive(displayTaskHandle);      // Ereignis -> Task wacht sofort auf
+  }
+#endif
+}
+
+// Zeichnet ein Bild aus einer KOPIE der Daten (kein Mutex während der Übertragung)
+void drawDisplay(const DisplayData &d) {
+  char line[32];
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+
+  // Zeile 1: Abstand
+  if (isnan(d.rangeM)) {
+    snprintf(line, sizeof(line), "Abstand: --");
+  } else if (isinf(d.rangeM)) {
+    snprintf(line, sizeof(line), "Abstand: %s", d.rangeM > 0 ? "frei (>4m)" : "zu nah");
+  } else {
+    snprintf(line, sizeof(line), "Abstand: %.3f m", d.rangeM);
+  }
+  oled.drawStr(0, 10, line);
+
+  // Zeile 2: Zustand vom Host (Auswertung auf dem Host)
+  const char *st = "--";
+  bool fresh = (millis() - d.hostStateMs) <= ROBOT_STATE_TIMEOUT_MS;
+  if (fresh) {
+    switch (d.hostState) {
+      case 1: st = "FREI"; break;
+      case 2: st = "HINDERNIS"; break;
+      case 3: st = "keine Sensordaten"; break;
+      default: st = "?"; break;
+    }
+  }
+  snprintf(line, sizeof(line), "Host: %s", st);
+  oled.drawStr(0, 22, line);
+  if (fresh && d.hostState == 2) {
+    oled.drawFrame(0, 13, 128, 11);          // Hindernis hervorheben
+  }
+
+  // Zeile 3: Warnstufe (Buzzer)
+  if (d.buzzerPeriod == 0) {
+    snprintf(line, sizeof(line), "Warnung: aus");
+  } else if (d.buzzerPeriod == 1) {
+    snprintf(line, sizeof(line), "Warnung: Dauerton");
+  } else {
+    snprintf(line, sizeof(line), "Warnung: %u ms", d.buzzerPeriod);
+  }
+  oled.drawStr(0, 34, line);
+
+  // Zeile 4: Radbefehle
+  if (d.cmdTimedOut) {
+    snprintf(line, sizeof(line), "Rad: Stopp (Timeout)");
+  } else {
+    snprintf(line, sizeof(line), "Rad L %+d R %+d", d.wheelLeft, d.wheelRight);
+  }
+  oled.drawStr(0, 46, line);
+
+  // Zeile 5: Diagnose Zeitverhalten
+  snprintf(line, sizeof(line), "loop %.1f ctl %.1f ms", d.loopMaxUs / 1000.0f, d.ctrlMaxUs / 1000.0f);
+  oled.drawStr(0, 60, line);
+
+  oled.sendBuffer();                         // ca. 32 ms bei 400 kHz
+}
+
+void copyDisplayData(DisplayData &out) {
+  if (xSemaphoreTake(dispMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    out = dispData;                          // nur kopieren, dann sofort freigeben
+    xSemaphoreGive(dispMutex);
+  }
+}
+
+#if DISPLAY_IN_TASK
+// FreeRTOS-Task auf Kern 0: einziger Nutzer von I2C/U8g2
+void displayTask(void *arg) {
+  (void)arg;
+  DisplayData local = dispData;
+  for (;;) {
+    // blockiert ohne CPU-Last bis Ereignis (Notification) oder Ablauf der Periode
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DISPLAY_PERIOD_MS));
+    copyDisplayData(local);
+    drawDisplay(local);
+  }
+}
+#endif
+
+void setupDisplay() {
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  oled.setI2CAddress(DISPLAY_ADDR_7BIT * 2);   // U8g2 erwartet 8-Bit-Schreibweise
+  oled.setBusClock(DISPLAY_BUS_HZ);
+  oled.begin();
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 10, "robot_base v5");
+  oled.drawStr(0, 24, "warte auf Agent ...");
+  oled.sendBuffer();
 }
 
 void setupTransport() {
@@ -386,6 +566,9 @@ void setup() {
   pinMode(US_ECHO_PIN, INPUT);
   noTone(BUZZER_PIN);                       // Buzzer definiert aus
 
+  dispMutex = xSemaphoreCreateMutex();
+  setupDisplay();                           // vor dem Task-Start: nur dieser Kontext nutzt I2C
+
   setupTransport();
   delay(2000);
 
@@ -414,23 +597,71 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16),
     "buzzer"));
 
+  RCCHECK(rclc_subscription_init_default(
+    &state_sub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
+    "robot_state"));
+
+  RCCHECK(rclc_publisher_init_default(
+    &diag_pub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
+    "loop_diag"));
+
   // Zeit mit dem Agent abgleichen (für Zeitstempel in /range); Fehler ist nicht kritisch
   rmw_uros_sync_session(1000);
   DBG("Zeitabgleich mit Agent: %s\n", rmw_uros_epoch_synchronized() ? "ok" : "nicht verfuegbar");
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));  // 2 Subscriber
+  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));  // 3 Subscriber
   RCCHECK(rclc_executor_add_subscription(
     &executor, &cmd_vel_sub, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &buzzer_sub, &buzzer_msg, &buzzer_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &state_sub, &state_msg, &state_callback, ON_NEW_DATA));
 
-  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, Publisher /wheel_cmd, /range\n");
+  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, /robot_state, Publisher /wheel_cmd, /range, /loop_diag\n");
+#if DISPLAY_IN_TASK
+  // Display-Task auf Kern 0 (loop() läuft auf Kern 1), Priorität 1, 4 KB Stack
+  xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, 1, &displayTaskHandle, 0);
+  DBG("Display: eigene Task auf Kern 0 (loop auf Kern %d)\n", xPortGetCoreID());
+#elif DISPLAY_IN_LOOP
+  DBG("Display: Vergleichsvariante in loop() (Kern %d)\n", xPortGetCoreID());
+#else
+  DBG("Display: AUS (Grundlinie, nur Startbild)\n");
+#endif
   lastControlMs = millis();
   usLastTriggerMs = millis();
   attachInterrupt(digitalPinToInterrupt(US_ECHO_PIN), echoIsr, CHANGE);
+  lastDiagMs = millis();
 }
 
+// Diagnose: einmal pro Sekunde Maxima/Minima veröffentlichen und zurücksetzen
+void diagStep() {
+  uint32_t now = millis();
+  if (now - lastDiagMs < DIAG_PERIOD_MS) {
+    return;
+  }
+  lastDiagMs = now;
+  diag_msg.x = (double)diagLoopMaxUs;
+  diag_msg.y = (double)diagCtrlMaxUs;
+  diag_msg.z = (diagCtrlMinUs == UINT32_MAX) ? 0.0 : (double)diagCtrlMinUs;
+  RCSOFTCHECK(rcl_publish(&diag_pub, &diag_msg, NULL));
+  if (xSemaphoreTake(dispMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    dispData.loopMaxUs = diagLoopMaxUs;
+    dispData.ctrlMaxUs = diagCtrlMaxUs;
+    xSemaphoreGive(dispMutex);
+  }
+  diagLoopMaxUs = 0;
+  diagCtrlMaxUs = 0;
+  diagCtrlMinUs = UINT32_MAX;
+}
+
+#if DISPLAY_IN_LOOP
+uint32_t lastDisplayMs = 0;
+#endif
+
 void loop() {
+  uint32_t loopStartUs = micros();
   RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 
   uint32_t now = millis();
@@ -439,9 +670,30 @@ void loop() {
     if (now - lastControlMs >= CONTROL_PERIOD_MS) {
       lastControlMs = now;                           // nach langer Blockade nicht nachholen
     }
+    uint32_t nowUs = micros();
+    if (lastCtrlUs != 0) {
+      uint32_t dt = nowUs - lastCtrlUs;      // tatsächlicher Abstand der Regelschritte
+      if (dt > diagCtrlMaxUs) diagCtrlMaxUs = dt;
+      if (dt < diagCtrlMinUs) diagCtrlMinUs = dt;
+    }
+    lastCtrlUs = nowUs;
     controlStep();
   }
 
   ultrasonicStep();
   buzzerStep();
+  diagStep();
+
+#if DISPLAY_IN_LOOP
+  // Vergleichsvariante: Display blockiert loop() für die Dauer der Übertragung
+  if (millis() - lastDisplayMs >= DISPLAY_PERIOD_MS) {
+    lastDisplayMs = millis();
+    DisplayData local = dispData;            // Vorbelegung, falls der Mutex nicht frei ist
+    copyDisplayData(local);
+    drawDisplay(local);
+  }
+#endif
+
+  uint32_t loopUs = micros() - loopStartUs;
+  if (loopUs > diagLoopMaxUs) diagLoopMaxUs = loopUs;
 }

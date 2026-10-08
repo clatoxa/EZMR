@@ -16,7 +16,11 @@ Verhalten:
 - Sonderwerte (REP 117, Firmware v3): +inf = frei, -inf = zu nah,
   nan = kein Echo (Sensorfehler) -> beide wie Abstand 0 behandelt (sperren).
 
-Stand 08.10.2026: UNGETESTET.
+Stufe 11: veröffentlicht zusätzlich den Zustand auf /robot_state (std_msgs/UInt8) für das Display:
+1 = FREI, 2 = HINDERNIS (vorwärts gesperrt), 3 = keine aktuellen Sensordaten (vorwärts gesperrt).
+Senden bei Zustandswechsel sofort und sonst alle 0,2 s.
+
+Stand 08.10.2026: Grundfunktion getestet (Stufe 10b); /robot_state UNGETESTET.
 """
 import math
 import statistics
@@ -26,6 +30,11 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Range
+from std_msgs.msg import UInt8
+
+STATE_FREE = 1
+STATE_OBSTACLE = 2
+STATE_NO_DATA = 3
 
 
 class ObstacleStop(Node):
@@ -40,6 +49,7 @@ class ObstacleStop(Node):
         self.declare_parameter('release_distance', 0.25)  # m: darüber freigeben
         self.declare_parameter('range_timeout', 0.5)      # s: ohne Messwert -> sperren
         self.declare_parameter('median_window', 3)        # Anzahl Werte im Medianfilter
+        self.declare_parameter('state_topic', '/robot_state')
 
         in_topic = self.get_parameter('input_topic').value
         out_topic = self.get_parameter('output_topic').value
@@ -60,6 +70,9 @@ class ObstacleStop(Node):
         self.pub = self.create_publisher(Twist, out_topic, 10)
         self.create_subscription(Twist, in_topic, self.on_cmd, 10)
         self.create_subscription(Range, range_topic, self.on_range, 10)
+        self.state_pub = self.create_publisher(UInt8, self.get_parameter('state_topic').value, 10)
+        self.last_state = None
+        self.create_timer(0.2, self.publish_state)
 
         self.get_logger().info(
             f'{in_topic} -> {out_topic}, Sensor {range_topic}, '
@@ -81,6 +94,19 @@ class ObstacleStop(Node):
         elif not self.blocked and self.last_median < self.stop_distance:
             self.blocked = True
             self.get_logger().warn(f'HINDERNIS -> vorwärts gesperrt (Abstand {self.last_median:.3f} m)')
+        if self.current_state() != self.last_state:
+            self.publish_state()                 # Zustandswechsel sofort melden (Display-Ereignis)
+
+    def current_state(self):
+        if self.range_is_stale():
+            return STATE_NO_DATA
+        return STATE_OBSTACLE if self.blocked else STATE_FREE
+
+    def publish_state(self):
+        msg = UInt8()
+        msg.data = self.current_state()
+        self.state_pub.publish(msg)
+        self.last_state = msg.data
 
     def range_is_stale(self):
         if self.last_range_time is None:
