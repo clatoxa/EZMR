@@ -14,7 +14,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 |---|---|---|
 | 2.1 | ROS-2-Grundlagen, turtlesim | ✔ im Kern abgeschlossen |
 | 2.2 | Eigenes ROS-2-Paket (Fahrfolge in turtlesim) | ✔ Kernaufgabe erfüllt (Paket, Node, Launchfile, Parameterdatei) |
-| 2.3 | ESP32-Roboter über micro-ROS | ⏳ in Arbeit: micro-ROS-Verbindung, Twist-Empfang und Motorprotokoll ✔; Differentialantrieb und Fahrfigur offen |
+| 2.3 | ESP32-Roboter über micro-ROS | ⏳ in Arbeit: micro-ROS-Verbindung, Twist-Empfang, Motorprotokoll und Differentialantrieb ✔ (aufgebockt); Fahrfigur auf dem Boden offen |
 | 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ⏳ |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
 | 2.6 / OTA | FreeRTOS, OTA-Updates | optional, nicht ausgewählt |
@@ -30,8 +30,8 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 5 | micro-ROS-Verbindung (Int32-Publisher) | 2.3 | ✔ |
 | 6 | Twist-Subscriber auf dem ESP32, Empfang ohne Motoren | 2.3 | ✔ |
 | 7 | Motorprotokoll: Einzelbefehle über UART an die ATtiny212 | 2.3 | ✔ (systematisch ermittelt) |
-| 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ⏳ als Nächstes |
-| 9 | `shape_driver` auf dem realen Roboter | 2.3 | ⏳ |
+| 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
+| 9 | `shape_driver` auf dem realen Roboter | 2.3 | ⏳ als Nächstes (zuerst WLAN-Transport) |
 | 10 | Sensorintegration | 2.4 | ⏳ |
 | 11 | Eigenes Projekt mit Host-Auswertung | 2.4 | ⏳ |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
@@ -85,6 +85,16 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | Stopp | `mode 1`, `param 0` | Versuch H5 (beide Räder) |
 | Timeout im ATtiny | keiner beobachtet (> 20 s Lauf ohne neuen Befehl) | Versuch H4 |
 | Versorgung | Motoren laufen auch über USB allein | Versuche mit Akku aus |
+
+### Fahrwerk (gemessen 08.10.2026, Lineal, ca.-Werte)
+
+| Größe | Wert |
+|---|---|
+| Raddurchmesser | ≈ 82 mm → Umfang ≈ 257,6 mm |
+| Spurweite (Abstand der Radmitten) | ≈ 165 mm |
+| Weg pro Schritt | ≈ 0,1258 mm (2048 Schritte/Umdrehung) |
+| Umrechnung `mode 1` | `param` [ms] = 125,8 / v [mm/s] |
+| Höchste geprüfte Radgeschwindigkeit | 62,9 mm/s (`param 2`) |
 
 ---
 
@@ -478,14 +488,68 @@ ros2 topic pub /cmd_vel → Agent → ESP32 (Subscriber) → Publisher /cmd_vel_
 4. Richtungszuordnung je Rad (links vorwärts `dir 1`, rechts vorwärts `dir 0`).
 5. Timeout im ESP32: ohne neuen `Twist` (z. B. 0,5 s) beide Räder stoppen.
 
+### 08.10.2026 – 2.3 Stufe 8: Differentialantrieb
+
+**Messung:** Raddurchmesser ≈ 82 mm, Spurweite ≈ 165 mm (Lineal). Unsicherheit ±1 mm beim Durchmesser ≈ ±1,2 % Streckenfehler → Kalibrierfahrt in Stufe 9 vorgesehen.
+
+**Rechnung:**
+```text
+Umfang       U = π · 82 mm        ≈ 257,6 mm
+Weg/Schritt  s = U / 2048          ≈ 0,1258 mm
+param [ms]     = 1000 · s / v      = 125,8 / v [mm/s]
+v_links  = v − ω · L/2,   v_rechts = v + ω · L/2   (L = 0,165 m, ω > 0 = gegen den Uhrzeigersinn)
+```
+
+| `param` | Schritte/s | Radgeschwindigkeit |
+|---|---|---|
+| 1 | 1000 | 126 mm/s (ungetestet, nicht verwendet) |
+| 2 | 500 | 62,9 mm/s |
+| 3 | 333 | 41,9 mm/s |
+| 4 | 250 | 31,5 mm/s |
+| 5 | 200 | 25,2 mm/s |
+| 10 | 100 | 12,6 mm/s |
+
+**Folgerung:** Höchstgeschwindigkeit ≈ 6 cm/s; Drehen auf der Stelle max. ≈ 0,76 rad/s. Geschwindigkeiten sind grob gestuft (z. B. 50 mm/s nicht darstellbar: 63 oder 42 mm/s) → für genaue Fahrfiguren Geschwindigkeiten wählen, die genau einer `param`-Stufe entsprechen.
+
+**Firmware:** `firmware/robot_base` (Versionen wie Stufe 6 festgeschrieben)
+- Node `robot_base`; Subscriber `/cmd_vel` (Twist); Kontrolltopic `/wheel_cmd` (`geometry_msgs/Vector3`: x/y = vorzeichenbehafteter `param` links/rechts, + vorwärts, 0 Stopp; z = 1 bei Timeout)
+- Callback speichert nur `v`, `ω` und Empfangszeit; UART-Ausgabe im Regelschritt (alle 50 ms, `millis()`-basiert in `loop()`)
+- Timeout 500 ms ohne Twist → beide Räder Stopp (ATtiny hat keinen eigenen Timeout)
+- Stopp beim Start (vor micro-ROS-Initialisierung) und in `error_loop()`
+- Proportionale Sättigung auf v_max = 62,9 mm/s (Kurvenform bleibt erhalten)
+- Rundung auf ganzzahlige `param`, Bereich 2…100; langsamer als `param 100` (< 1,3 mm/s) → Stillstand
+- UART-Paket nur bei Änderung senden (ein Paket ≈ 6 ms bei 9600 Baud)
+- Bekannte Einschränkung: keine automatische Wiederverbindung zum Agent (Reset per EN nötig)
+
+**Tests** (aufgebockt, Agent über USB, `ros2 topic echo /wheel_cmd`):
+
+| Test | Befehl | Erwartung | `/wheel_cmd` | Räder |
+|---|---|---|---|---|
+| T1 | kein Befehl | Stillstand, z 1 | – | stehen ✔ |
+| T2 | `linear.x 0.03` (10 Hz) | 125,8/30 ≈ 4,2 → param 4/4 | – | beide vorwärts ✔ |
+| T3 | T2 beendet | Stopp ≤ 0,5 s | – | stoppen ✔ |
+| T4 | `angular.z 0.5` | ±41,25 mm/s → param 3; links rückwärts, rechts vorwärts | x −3, y 3, z 0 ✔ | wie erwartet ✔ |
+| T5 | `linear.x 0.2` | gesättigt → param 2/2 | x 2, y 2, z 0 ✔ | schneller als T2 ✔ |
+| T6 | T2 läuft, Agent beendet | Stopp ≤ 0,5 s | – | stoppen ✔ |
+
+**Ergebnis ✔:** Kinematik, Richtungszuordnung, Rundung, Sättigung und Timeout-Stopp (bei Senderausfall und bei Verbindungsabbruch) entsprechen der Vorhersage. Voraussetzung für die Bodenfahrt erfüllt.
+
+### 08.10.2026 – Vorbereitung Stufe 9
+
+**Problem:** Verfügbares datenfähiges USB-Kabel nur ≈ 1 m – Roboter würde bei Bodenfahrt am Kabel ziehen (Einfluss auf die Fahrfigur, Gefahr für die USB-Buchse).
+
+**Entscheidung:** micro-ROS-Transport auf WLAN (UDP) umstellen (Anleitung 4.1.4: Agent mit `udp4 --port 8888`; micro_ros_platformio: `board_microros_transport = wifi`, `set_microros_wifi_transports(ssid, psk, agent_ip, agent_port)`). Zugangsdaten nicht im öffentlichen Repository (`secrets.h`, per `.gitignore` ausgeschlossen).
+
+**Geplante Fahrparameter (`config/robot.yaml`, noch nicht getestet):** `linear_speed` 0,03145 m/s und `angular_speed` 0,3812 rad/s (beide Räder genau `param 4`), `side_length` 0,30 m, `publish_rate` 20 Hz. Reihenfolge: Geradeausfahrt 1 m (Kalibrierung) → Drehung 360° → Viereck.
+
 ---
 
 ## Offene Punkte
 
 **Technisch**
-- [ ] Stufe 8: Raddurchmesser und Spurweite messen
-- [ ] Stufe 8: Differentialkinematik und Umrechnung in `param` (ms/Schritt) inkl. Rundung und Mindestwert
-- [ ] Stufe 8: Timeout-Stopp im ESP32 (keine Befehle → Motoren stoppen) – Voraussetzung für Bodenfahrt
+- [ ] Stufe 9a: micro-ROS über WLAN (UDP) – Netzwerk, Agent-IP, `secrets.h`
+- [ ] Stufe 9b: Kalibrierfahrten (1 m geradeaus, 360° Drehung), dann Viereck mit `robot.yaml`
+- [ ] Automatische Wiederverbindung zum Agent (derzeit Reset per EN nötig) – optional
 - [ ] `param 1` (schnellste Stufe) und Verhalten unter Last prüfen (Schrittverluste?)
 - [ ] Verhalten mit Akku an und USB gleichzeitig klären (Versorgung, Wirkung des Akkuschalters)
 - [ ] Anfrage an Betreuung zum ATtiny-Protokoll versenden / Antwort mit Versuchsergebnissen abgleichen
