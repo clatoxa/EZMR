@@ -1,11 +1,13 @@
-// Stufe 8: Differentialantrieb.
-// Empfängt geometry_msgs/Twist auf /cmd_vel (micro-ROS über USB-Seriell),
+// Stufe 8/9: Differentialantrieb.
+// Empfängt geometry_msgs/Twist auf /cmd_vel (micro-ROS über USB-Seriell ODER WLAN/UDP),
 // rechnet in Radgeschwindigkeiten um und steuert die ATtiny212-Motorcontroller
 // im Dauerbetrieb (mode 1) über UART2 / GPIO 17.
-// Sicherheit: Stopp beim Start, bei Timeout (keine Twist-Nachricht) und im Fehlerfall.
+// Sicherheit: Stopp beim Start, bei Timeout (keine Twist-Nachricht) und im Fehlerfall;
+// aktueller Motorbefehl wird zusätzlich jede Sekunde wiederholt (UART ohne Bestätigung).
 // Kontrolltopic /wheel_cmd (geometry_msgs/Vector3):
 //   x = linkes Rad, y = rechtes Rad: vorzeichenbehafteter param (+ vorwärts, - rückwärts, 0 Stopp)
 //   z = 1 bei Timeout, sonst 0
+// Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
 #include <micro_ros_platformio.h>
@@ -17,8 +19,19 @@
 #include <geometry_msgs/msg/twist.h>
 #include <geometry_msgs/msg/vector3.h>
 
-#if !defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
-#error This firmware requires the Arduino serial transport.
+#if defined(MICRO_ROS_TRANSPORT_ARDUINO_WIFI)
+#include "secrets.h"            // lokal, nicht im Repository (Vorlage: secrets.h.example)
+#define DEBUG_ENABLED 1         // Serial ist frei -> Statusausgaben erlaubt
+#elif defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
+#define DEBUG_ENABLED 0         // Serial ist micro-ROS-Transport -> KEINE Ausgaben
+#else
+#error Nur die Transporte serial und wifi werden unterstuetzt.
+#endif
+
+#if DEBUG_ENABLED
+#define DBG(...) Serial.printf(__VA_ARGS__)
+#else
+#define DBG(...) do {} while (0)
 #endif
 
 // ---------- Geometrie (gemessen 08.10.2026, ca.-Werte) ----------
@@ -43,6 +56,7 @@ static const uint16_t PARAM_MIN         = 2;    // schnellste geprüfte Stufe
 static const uint16_t PARAM_MAX         = 100;  // langsamer -> Stillstand
 static const uint32_t CMD_TIMEOUT_MS    = 500;
 static const uint32_t CONTROL_PERIOD_MS = 50;
+static const uint32_t RESEND_PERIOD_MS  = 1000; // Befehl regelmäßig wiederholen (UART ohne Bestätigung)
 static const float    V_MAX             = STEP_DIST_M * 1000.0f / PARAM_MIN;  // ca. 0,063 m/s
 
 struct WheelCmd {
@@ -65,8 +79,11 @@ float cmdV = 0.0f;              // m/s
 float cmdW = 0.0f;              // rad/s
 uint32_t lastCmdMs = 0;
 bool cmdReceived = false;
+bool lastTimedOut = true;
 WheelCmd lastLeft  = {0, 0};
 WheelCmd lastRight = {0, 0};
+uint32_t lastSentLeftMs  = 0;
+uint32_t lastSentRightMs = 0;
 uint32_t lastControlMs = 0;
 
 // ---------- Motor-UART ----------
@@ -84,15 +101,16 @@ void stopMotors() {
   lastRight = {0, 0};
 }
 
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
-#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
-
-void error_loop() {
+void error_loop(int line) {
   stopMotors();
+  DBG("FEHLER: micro-ROS-Aufruf in Zeile %d fehlgeschlagen (Agent erreichbar?). Neustart mit EN.\n", line);
   while (1) {
     delay(100);
   }
 }
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop(__LINE__);}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
 
 // ---------- Umrechnung ----------
 // Radgeschwindigkeit [m/s] -> Richtung und param (ms pro Schritt)
@@ -122,19 +140,26 @@ float signedParam(const WheelCmd &c, uint8_t dirForward) {
   return (c.dir == dirForward) ? (float)c.param : -(float)c.param;
 }
 
-void applyWheel(uint8_t id, const WheelCmd &c, WheelCmd &last) {
+void applyWheel(uint8_t id, const WheelCmd &c, WheelCmd &last, uint32_t &lastSentMs) {
+  uint32_t now = millis();
   bool same = (c.param == last.param) && (c.param == 0 || c.dir == last.dir);
-  if (same) {
-    return;                                 // unverändert -> nichts senden
+  if (same && (now - lastSentMs < RESEND_PERIOD_MS)) {
+    return;                                 // unverändert und kürzlich gesendet
   }
   sendMotorFrame(id, MODE_CONT, c.dir, c.param);
   last = c;
+  lastSentMs = now;
 }
 
 // ---------- Regelschritt (alle CONTROL_PERIOD_MS) ----------
 void controlStep() {
   uint32_t now = millis();
   bool timedOut = !cmdReceived || (now - lastCmdMs > CMD_TIMEOUT_MS);
+
+  if (timedOut != lastTimedOut) {
+    DBG(timedOut ? "Timeout -> Stopp\n" : "Befehle empfangen -> Fahrt\n");
+    lastTimedOut = timedOut;
+  }
 
   float vl = 0.0f;
   float vr = 0.0f;
@@ -151,8 +176,8 @@ void controlStep() {
 
   WheelCmd l = wheelSpeedToCmd(vl, DIR_FWD_LEFT);
   WheelCmd r = wheelSpeedToCmd(vr, DIR_FWD_RIGHT);
-  applyWheel(ID_LEFT, l, lastLeft);
-  applyWheel(ID_RIGHT, r, lastRight);
+  applyWheel(ID_LEFT, l, lastLeft, lastSentLeftMs);
+  applyWheel(ID_RIGHT, r, lastRight, lastSentRightMs);
 
   wheel_cmd_msg.x = signedParam(l, DIR_FWD_LEFT);
   wheel_cmd_msg.y = signedParam(r, DIR_FWD_RIGHT);
@@ -169,13 +194,30 @@ void cmd_vel_callback(const void *msgin) {
   cmdReceived = true;
 }
 
+void setupTransport() {
+#if defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
+  Serial.begin(115200);
+  set_microros_serial_transports(Serial);   // Serial = Transport zum Agent
+#elif defined(MICRO_ROS_TRANSPORT_ARDUINO_WIFI)
+  Serial.begin(115200);
+  delay(200);
+  static char ssid[] = WIFI_SSID;           // Funktion erwartet char* (nicht const)
+  static char psk[]  = WIFI_PASSWORD;
+  IPAddress agent_ip(AGENT_IP);
+  DBG("\n=== robot_base (WLAN) ===\nVerbinde mit WLAN '%s' ...\n", ssid);
+  set_microros_wifi_transports(ssid, psk, agent_ip, AGENT_PORT);  // blockiert bis WLAN verbunden
+  WiFi.setSleep(false);                     // Energiesparmodus aus (geringere Latenz, Annahme)
+  DBG("WLAN verbunden, eigene IP: %s\n", WiFi.localIP().toString().c_str());
+  DBG("Agent: %s, Port %d\n", agent_ip.toString().c_str(), (int)AGENT_PORT);
+#endif
+}
+
 void setup() {
   // Motoren zuerst in definierten Zustand bringen
   Serial2.begin(MOTOR_BAUD, SERIAL_8N1, MOTOR_RX_PIN, MOTOR_TX_PIN);
   stopMotors();
 
-  Serial.begin(115200);
-  set_microros_serial_transports(Serial);   // Serial = Transport zum Agent
+  setupTransport();
   delay(2000);
 
   allocator = rcl_get_default_allocator();
@@ -196,6 +238,7 @@ void setup() {
   RCCHECK(rclc_executor_add_subscription(
     &executor, &cmd_vel_sub, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
 
+  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, Publisher /wheel_cmd\n");
   lastControlMs = millis();
 }
 
@@ -204,7 +247,10 @@ void loop() {
 
   uint32_t now = millis();
   if (now - lastControlMs >= CONTROL_PERIOD_MS) {
-    lastControlMs = now;
+    lastControlMs += CONTROL_PERIOD_MS;              // Soll-Takt halten (kein Drift)
+    if (now - lastControlMs >= CONTROL_PERIOD_MS) {
+      lastControlMs = now;                           // nach langer Blockade nicht nachholen
+    }
     controlStep();
   }
 }
