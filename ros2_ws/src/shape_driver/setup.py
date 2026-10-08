@@ -30,7 +30,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'shape_driver_node = shape_driver.shape_driver_node:main'
+            'shape_driver_node = shape_driver.shape_driver_node:main',
+	    'calib_drive = shape_driver.calib_drive:main',
         ],
     },
 )

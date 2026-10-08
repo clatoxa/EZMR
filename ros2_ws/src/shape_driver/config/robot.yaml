@@ -1,0 +1,14 @@
+# Fahrparameter für den realen Roboter (ESP32 über micro-ROS).
+# Geschwindigkeiten so gewählt, dass beide Räder genau param 4 erhalten (keine Rundungsfehler):
+#   Weg/Schritt = pi * 0,082 m / 2048 = 0,12579 mm
+#   v = 0,12579 mm * 1000 / 4 ms = 0,031447 m/s
+#   w = 2 * v / 0,165 m = 0,381171 rad/s
+# Werte gelten für die gemessenen ca.-Maße (Rad 82 mm, Spur 165 mm) – Kalibrierung ausstehend.
+shape_driver:
+  ros__parameters:
+    cmd_vel_topic: /cmd_vel
+    num_sides: 4
+    side_length: 0.30        # m  -> ca. 9,54 s pro Seite
+    linear_speed: 0.03129   # m/s
+    angular_speed: 0.3692  # rad/s -> 90° in ca. 4,12 s
+    publish_rate: 20.0       # Hz (Timeout ESP32: 0,5 s)

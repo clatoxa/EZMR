@@ -14,7 +14,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 |---|---|---|
 | 2.1 | ROS-2-Grundlagen, turtlesim | ✔ im Kern abgeschlossen |
 | 2.2 | Eigenes ROS-2-Paket (Fahrfolge in turtlesim) | ✔ Kernaufgabe erfüllt (Paket, Node, Launchfile, Parameterdatei) |
-| 2.3 | ESP32-Roboter über micro-ROS | ⏳ in Arbeit: micro-ROS-Verbindung, Twist-Empfang, Motorprotokoll und Differentialantrieb ✔ (aufgebockt); Fahrfigur auf dem Boden offen |
+| 2.3 | ESP32-Roboter über micro-ROS | ✔ Kernaufgabe erfüllt: `shape_driver` fährt das Viereck auf dem realen Roboter (micro-ROS über WLAN, Akku) |
 | 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ⏳ |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
 | 2.6 / OTA | FreeRTOS, OTA-Updates | optional, nicht ausgewählt |
@@ -31,8 +31,8 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 6 | Twist-Subscriber auf dem ESP32, Empfang ohne Motoren | 2.3 | ✔ |
 | 7 | Motorprotokoll: Einzelbefehle über UART an die ATtiny212 | 2.3 | ✔ (systematisch ermittelt) |
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
-| 9 | `shape_driver` auf dem realen Roboter | 2.3 | ⏳ als Nächstes (zuerst WLAN-Transport) |
-| 10 | Sensorintegration | 2.4 | ⏳ |
+| 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
+| 10 | Sensorintegration | 2.4 | ⏳ als Nächstes |
 | 11 | Eigenes Projekt mit Host-Auswertung | 2.4 | ⏳ |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
@@ -53,6 +53,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | micro-ROS-Agent | Workspace `~/micro_ros_ws`, `micro_ros_setup` Branch humble |
 | Entwicklungsumgebung ESP32 | VS Code (snap) mit Erweiterung PlatformIO IDE, PlatformIO Core 6.2.0 |
 | Repository | `github.com/clatoxa/EZMR`, eigener Branch `leo` |
+| Netzwerk Fahrbetrieb | Heim-Router; Host per Kabel (192.168.17.29), ESP32 per WLAN 2,4 GHz (192.168.17.38); Agent `udp4 --port 8888` |
 
 **Entscheidung Arbeitsumgebung:** Auf dem Host lief zuvor Ubuntu 24.04. ROS 2 Humble wird offiziell nur für Ubuntu 22.04 als Binärpaket bereitgestellt; die Praktikumsanleitung (2.1) fordert Ubuntu 22.04. Daher wurde Ubuntu 22.04 nativ als Dual-Boot eingerichtet. Begründung gegenüber einer VM: direkter USB-Zugriff auf den ESP32 und direkte Netzwerkerreichbarkeit des micro-ROS-Agents in Abschnitt 2.3.
 
@@ -95,6 +96,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | Weg pro Schritt | ≈ 0,1258 mm (2048 Schritte/Umdrehung) |
 | Umrechnung `mode 1` | `param` [ms] = 125,8 / v [mm/s] |
 | Höchste geprüfte Radgeschwindigkeit | 62,9 mm/s (`param 2`) |
+| Kalibrierte Werte (`robot.yaml`) | `linear_speed` 0,03129 m/s, `angular_speed` 0,3692 rad/s (beide Räder `param 4`) |
 
 ---
 
@@ -540,15 +542,90 @@ v_links  = v − ω · L/2,   v_rechts = v + ω · L/2   (L = 0,165 m, ω > 0 = 
 
 **Entscheidung:** micro-ROS-Transport auf WLAN (UDP) umstellen (Anleitung 4.1.4: Agent mit `udp4 --port 8888`; micro_ros_platformio: `board_microros_transport = wifi`, `set_microros_wifi_transports(ssid, psk, agent_ip, agent_port)`). Zugangsdaten nicht im öffentlichen Repository (`secrets.h`, per `.gitignore` ausgeschlossen).
 
-**Geplante Fahrparameter (`config/robot.yaml`, noch nicht getestet):** `linear_speed` 0,03145 m/s und `angular_speed` 0,3812 rad/s (beide Räder genau `param 4`), `side_length` 0,30 m, `publish_rate` 20 Hz. Reihenfolge: Geradeausfahrt 1 m (Kalibrierung) → Drehung 360° → Viereck.
+**Geplante Fahrparameter (`config/robot.yaml`, Ausgangswerte vor der Kalibrierung):** `linear_speed` 0,03145 m/s und `angular_speed` 0,3812 rad/s (beide Räder genau `param 4`), `side_length` 0,30 m, `publish_rate` 20 Hz. Reihenfolge: Geradeausfahrt 1 m (Kalibrierung) → Drehung 360° → Viereck.
+
+### 08.10.2026 – 2.3 Stufe 9a: micro-ROS über WLAN
+
+**Umsetzung `firmware/robot_base`:**
+- `platformio.ini` mit zwei Umgebungen bei identischem Code: `env:serial` (`board_microros_transport = serial`) und `env:wifi` (`= wifi`); Auswahl im Code über `MICRO_ROS_TRANSPORT_ARDUINO_SERIAL` / `_WIFI`
+- WLAN: `set_microros_wifi_transports(ssid, psk, agent_ip, 8888)` (laut Bibliotheksquelle blockierend bis zur WLAN-Verbindung → Motorstopp vorher); `WiFi.setSleep(false)` (Annahme: geringere Latenz)
+- Im WLAN-Modus ist `Serial` frei → Statusausgaben (Verbindung, IP, Timeout, Fehlerzeile in `error_loop`)
+- Zugangsdaten in `include/secrets.h` (lokal), per `.gitignore` ausgeschlossen – geprüft mit `git check-ignore -v` (`.gitignore:17 **/secrets.h`); im Repository nur `include/secrets.h.example`
+- Agent: `ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888`; `ufw` inaktiv
+
+**⚠ Zwischenfälle:**
+- Falsche `main.cpp` geflasht (gleichnamiger Download `main(1).cpp` → Testkonsole statt `robot_base`); erkannt an der Monitorausgabe. Lösung: eindeutige Dateinamen (`robot_base_main.cpp`).
+- Upload-Fehler „port is busy“: offener serieller Monitor (`fuser -v /dev/ttyUSB0` → `pio`).
+- Keine Verbindung nach Neustart des ESP32 ohne laufenden Agent bzw. nach Beenden des Agents → Reihenfolge: Agent starten, dann EN. Vor jeder Fahrt `ros2 node list` prüfen.
+
+**Ergebnis Verbindung ✔:** `session established` von 192.168.17.38; Node `/robot_base`.
+
+**Befund Drift im Regeltakt:** `/wheel_cmd` kam mit 18,6 Hz statt 20 Hz (23–79 ms). Ursache: `lastControlMs = now` – Verspätungen der Schleife summieren sich. Korrektur: `lastControlMs += CONTROL_PERIOD_MS` (Soll-Takt) mit Schutz gegen Nachholen nach langer Blockade.
+
+| | vorher | nachher |
+|---|---|---|
+| Mittlere Rate | 18,6 Hz | 20,0 Hz |
+| min / max | 23 / 79 ms | 42 / 59 ms |
+| Standardabweichung | ≈ 3,3 ms | ≈ 4,2 ms |
+| Stichprobe | 228 | 165 |
+
+Interpretation: Drift (systematisch, summiert sich) beseitigt; verbleibender Jitter ±8 ms (Schleifenlaufzeit, WLAN), der sich im Mittel ausgleicht.
+
+**⚠ Versorgung:** Im WLAN-Modus mit USB-Versorgung (Akku aus) drehten die Motoren nicht, obwohl `/wheel_cmd` korrekt war (x 4, y 4, z 0) und alle LEDs der ULN2003-Platinen leuchteten (bei 250 Schritten/s als Dauerleuchten wahrgenommen). Mit Akku (USB getrennt) drehen beide Räder. Wahrscheinliche Ursache: USB-Versorgung reicht nicht für ESP32 + WLAN + Motoren (nicht gemessen).
+- Regel: Flashen/Monitor über USB (Akku aus); Fahrbetrieb über Akku (USB getrennt); nie beides gleichzeitig (Verhalten der Platine unbekannt).
+- Not-Aus im Akkubetrieb: Akkuschalter ✔ (sofortiger Stillstand).
+
+**Verbesserung Sicherheit:** Der aktuelle Motorbefehl (auch Stopp) wird zusätzlich jede Sekunde wiederholt (`RESEND_PERIOD_MS = 1000`), da der UART zu den ATtinys keine Bestätigung kennt (Schutz gegen verlorene Stopp-Befehle).
+
+**Tests mit Akku über WLAN (aufgebockt):** T2 beide vorwärts ✔; T3 schneller Stopp ✔; T4 links rückwärts, rechts vorwärts ✔; T6 Stopp bei Agent-Abbruch ✔.
+
+**Beobachtung mehrere Sender:** Liefen T2 und T4 gleichzeitig in zwei Terminals, wechselte das linke Rad zwischen vorwärts (+4) und rückwärts (−3); nach Beenden eines Senders folgte der Roboter dem verbleibenden. Erklärung: Ein Topic erlaubt mehrere Publisher ohne Vorrangregel. Regel: nur ein Sender auf `/cmd_vel` (Prüfung: `ros2 topic info /cmd_vel`).
+
+### 08.10.2026 – 2.3 Stufe 9b: Kalibrierung und Fahrfigur auf dem Boden
+
+**Werkzeug:** Node `calib_drive` (Paket `shape_driver`): Startverzögerung 3 s, konstanter Twist für eine feste Dauer, danach 5 Nullbefehle (sauberer Stopp unabhängig vom ESP32-Timeout); bei Strg+C Nullbefehl. Aufbau: glatter Boden, WLAN, Akku; Messung mit Maßband bzw. Sichtprüfung an Klebebandmarkierungen.
+
+**⚠ Zwischenfall:** Erste Fahrt ohne Bewegung – ESP32 nicht verbunden (`ros2 node list` leer, `/cmd_vel` unbekannt). Lösung: Agent starten, EN, `session established` abwarten.
+
+| Fahrt | Befehl | Soll | Ist | Abweichung |
+|---|---|---|---|---|
+| K1 | `linear_speed 0.031447`, 31,80 s | 1000 mm geradeaus | 995 mm, keine sichtbare Seitenabweichung | −0,5 % |
+| K2 | `angular_speed 0.381171`, 16,48 s | 360° | ≈ 355° (geschätzt, ±2°) | ≈ −1,4 % |
+
+**Interpretation:** K1 entspricht einem effektiven Raddurchmesser ≈ 81,6 mm – innerhalb der Messunsicherheit (Lineal ±1 mm ≙ ±1,2 %; Start/Stopp im 50-ms-Raster ≙ ±1,6 mm je Ende). Gleiche wirksame Durchmesser links/rechts. K2 deutet zusätzlich auf eine wirksame Spurweite ≈ 166,5 mm statt 165 mm (Berührpunkt der Räder).
+
+**Kalibrierungsansatz:** Korrektur nicht über Geometrie in der Firmware (wegen grober `param`-Stufen wirkungslos – Räder bleiben bei `param 4`), sondern empirisch über die Ist-Geschwindigkeiten in `robot.yaml`, mit denen `shape_driver` die Phasendauern berechnet. Die Firmware setzt weiterhin `param 4` um.
+
+**Viereck** (`ros2 run shape_driver shape_driver_node --ros-args --params-file …/config/robot.yaml`; 4 Seiten à 0,30 m, 20 Hz, gegen den Uhrzeigersinn):
+
+| Durchgang | `linear_speed` | `angular_speed` | Richtung am Ende | Abstand Endpunkt–Start |
+|---|---|---|---|---|
+| 1 | 0,03129 m/s (aus K1) | 0,3760 rad/s (aus K2) | 5–8° zu wenig | ≈ 35 mm |
+| 2 | 0,03129 m/s | 0,3692 rad/s (Faktor 353,5/360 aus Durchgang 1) | ≈ 2° zu viel | ≈ 2–3 mm |
+
+**Interpretation:**
+- Durchgang 1: ≈ 1,5° Fehlwinkel je Ecke; der aufsummierte Richtungsfehler erklärt den Positionsversatz. Mögliche Ursachen: Unsicherheit der K2-Schätzung, Schrittverluste beim Richtungswechsel des linken Rads (Hypothese, nicht geprüft), Zeitraster 50 ms.
+- Durchgang 2: Vorzeichenwechsel des Winkelfehlers → optimaler Wert zwischen 0,3692 und 0,3760 rad/s (rechnerisch ≈ 0,371). Feinkorrektur liegt unterhalb der Ablese- und Fahrtstreuung und wurde nicht vorgenommen. Der sehr kleine Positionsfehler kann teilweise auf gegenseitige Kompensation zurückgehen.
+- Einschränkung: Einzelfahrten mit geschätzten Winkeln; keine Aussage zur Streuung.
+
+**Vergleich Simulation / Hardware:**
+
+| | turtlesim (50 Hz) | realer Roboter, kalibriert |
+|---|---|---|
+| Richtungsfehler nach Viereck | 2,1° (zu viel) | ≈ 2° (zu viel) |
+| Abstand zum Start | ≈ 0,04 E (≈ 2 % der Seite) | ≈ 2–3 mm (≈ 1 % der Seite) |
+| Hauptursache | Zeitraster | Kalibrierung/Mechanik (vor Kalibrierung ≈ 35 mm) |
+
+**Ergebnis ✔ (Pflichtaufgabe 2.3):** Die Node aus 2.2 steuert ohne Codeänderung – nur mit anderer Parameterdatei – den realen Roboter über micro-ROS (WLAN) und fährt das Viereck. Der Positionsfehler wurde durch empirische Kalibrierung von ≈ 35 mm auf ≈ 3 mm reduziert (Einzelfahrten). Es handelt sich um eine zeitgesteuerte Steuerung ohne Positionsrückführung.
 
 ---
 
 ## Offene Punkte
 
 **Technisch**
-- [ ] Stufe 9a: micro-ROS über WLAN (UDP) – Netzwerk, Agent-IP, `secrets.h`
-- [ ] Stufe 9b: Kalibrierfahrten (1 m geradeaus, 360° Drehung), dann Viereck mit `robot.yaml`
+- [ ] Stufe 10: Sensorprojekt auswählen und umsetzen (Erfassung ESP32, Auswertung Host)
+- [ ] Optional: Wiederholungen von K1/K2/Viereck zur Bestimmung der Streuung; K2 über 2 Umdrehungen
+- [ ] Optional: Hypothese Schrittverluste beim Richtungswechsel prüfen (Pause zwischen Phasen)
 - [ ] Automatische Wiederverbindung zum Agent (derzeit Reset per EN nötig) – optional
 - [ ] `param 1` (schnellste Stufe) und Verhalten unter Last prüfen (Schrittverluste?)
 - [ ] Verhalten mit Akku an und USB gleichzeitig klären (Versorgung, Wirkung des Akkuschalters)
