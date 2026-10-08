@@ -31,8 +31,9 @@ setup(
     entry_points={
         'console_scripts': [
             'shape_driver_node = shape_driver.shape_driver_node:main',
-	    'calib_drive = shape_driver.calib_drive:main',
-	    'obstacle_stop = shape_driver.obstacle_stop:main',
+        'calib_drive = shape_driver.calib_drive:main',
+        'obstacle_stop = shape_driver.obstacle_stop:main',
+        'distance_warner = shape_driver.distance_warner:main',
         ],
     },
 )

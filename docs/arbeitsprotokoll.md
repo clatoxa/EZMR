@@ -15,7 +15,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 2.1 | ROS-2-Grundlagen, turtlesim | ✔ im Kern abgeschlossen |
 | 2.2 | Eigenes ROS-2-Paket (Fahrfolge in turtlesim) | ✔ Kernaufgabe erfüllt (Paket, Node, Launchfile, Parameterdatei) |
 | 2.3 | ESP32-Roboter über micro-ROS | ✔ Kernaufgabe erfüllt: `shape_driver` fährt das Viereck auf dem realen Roboter (micro-ROS über WLAN, Akku) |
-| 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ⏳ in Arbeit: Ultraschall-Hinderniserkennung – Messung (10a) und Hinderniserkennung auf dem Host (10b) ✔ |
+| 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ✔ Ultraschall-Hinderniserkennung mit Sicherheitsfilter, Reaktionszeitmessung und akustischer Abstandswarnung (Stufe 10a–d) · Abgleich mit den Anforderungen der Anleitung ⏳ |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
 | 2.6 / OTA | FreeRTOS, OTA-Updates | optional, nicht ausgewählt |
 
@@ -32,7 +32,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 7 | Motorprotokoll: Einzelbefehle über UART an die ATtiny212 | 2.3 | ✔ (systematisch ermittelt) |
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
-| 10 | Sensorintegration (HC-SR04) | 2.4 | ✔ 10a Messung, ✔ 10b Hinderniserkennung · ⏳ 10c Reaktionszeit, 10d Buzzer (optional) |
+| 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
 | 11 | Eigenes Projekt mit Host-Auswertung | 2.4 | ⏳ |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
@@ -109,6 +109,15 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | Auflösung | 1 µs ≙ 0,17 mm | `micros()` |
 | Genauigkeit | ±1 cm bis 50 cm, −1,5 cm bei 100 cm | Stufe 10a |
 | Pegel ECHO | 5-V-Sensor an 3,3-V-Eingang – funktioniert, formal nicht geprüft | ⚠ offen |
+
+### Buzzer (Stufe 10d)
+
+| Merkmal | Wert | Grundlage |
+|---|---|---|
+| Typ | passiver Piezo-Buzzer (braucht Tonsignal, piept nicht bei Gleichspannung) | Anleitung 4.2.3, Tabelle 2 |
+| Anschluss | GPIO 4 | Anleitung 4.2.3, Tabelle 2; funktionsfähig |
+| Ansteuerung | Arduino `tone()` / `noTone()` (LEDC), 2000 Hz | Firmware v4; Frequenz angenommen, nicht optimiert |
+| Versorgung | funktioniert auch über USB allein | Versuch 10d |
 
 ---
 
@@ -724,13 +733,81 @@ Ursachen beobachtet, nicht gezielt nachgemessen. Folgerung: Der Sensor erkennt n
 
 **Ergebnis ✔:** Auswertung auf dem Host stoppt den realen Roboter zuverlässig vor einer Wand (≈ 19 cm bei Schwelle 20 cm) bei unverändertem Fahrprogramm. Die Fahr-Node bleibt unverändert; die Sicherheitslogik ist als eigene Node austauschbar.
 
+### 08.10.2026 – 2.4 Stufe 10c: Reaktionszeit Hindernis → Stopp
+
+**Methode:** Fahrten wie 10b Test 3 (31,4 mm/s, gerade vor glatter Wand), aufgezeichnet mit `ros2 bag record /range /cmd_vel_raw /cmd_vel /wheel_cmd` (Ablage `~/bags`, nicht im Repository). Auswertung mit `tools/analyze_stop_latency.py`: bildet die Filterlogik von `obstacle_stop` nach und bestimmt je Stopp
+- E0: erster Rohwert < 0,20 m der letzten ununterbrochenen Folge (`header.stamp`, ESP32-Uhr nach Zeitabgleich)
+- E1: Ankunft dieses Werts am Host
+- E2: Median < 0,20 m → Sperre
+- E3: erstes `/cmd_vel` mit `linear.x` = 0
+- E4: erstes `/wheel_cmd` 0/0 – vom ESP32 tatsächlich an die Motoren gesendet (Firmware veröffentlicht alle 50 ms)
+
+Zeitbasis E1–E4: Empfangszeit beim Rekorder (Host-Uhr).
+
+**⚠ Fehler und Lösungen:**
+- Mehrere Fahrten in einer Aufnahme (Rekorder nicht beendet) → je Stopp getrennt ausgewertet (Skript findet alle Stopps).
+- `disk I/O error`: Aufnahme beim Auswerten noch offen → erst Strg+C im Rekorder, dann auswerten.
+- Eigener Skriptfehler: Ein einzelner Ausreißer nach unten (0,164 m bei ≈ 0,47 m Abstand, 8 s vor dem Stopp) wurde als E0 gewertet (E1→E2 = 8600 ms) → E0 = Beginn der letzten ununterbrochenen Folge < 0,20 m.
+
+**Datenbasis:** 7 Stopps in 3 Aufnahmen; 5 sauber (stetige Annäherung), 2 gestört (Gegenstand bzw. Hand im Schallkegel, an sprunghaften Rohwerten erkennbar). Die Reaktionszeit hängt nicht vom Auslöser ab; gestörte Stopps beeinflussen nur die Endposition und zählen für die Zeiten mit. Ein Stopp ist aus E1→E2 und E1→E4 ausgenommen: Rohwerte 0,19997 → 0,203 → 0,19997 – der Median sperrt schon beim dritten Wert, nach Definition liegt E0 dort (E1→E2 = 0 ms), tatsächlich lag der erste Wert < 0,20 m 200 ms früher (Grenze der Methode).
+
+| Teilstrecke | n | Mittel | Spanne |
+|---|---|---|---|
+| E1→E2 Medianfilter | 6 | 102 ms | 98–112 ms |
+| E2→E3 Sperre → `/cmd_vel` 0 | 7 | 36 ms | 27–46 ms |
+| E3→E4 → `/wheel_cmd` 0 am Host | 7 | 27 ms | 17–52 ms |
+| E2→E4 ab Sperre | 7 | 63 ms | 46–98 ms |
+| **E1→E4 gesamt** | 6 | **159 ms** | 146–180 ms |
+
+E0→E1: 2,7–5,4 ms (abhängig von der Güte des Uhrenabgleichs, nur unter Vorbehalt). Nachlauf bei 31,4 mm/s ≈ 5 mm (4,6–5,7 mm), übereinstimmend mit 10b. Der Ausreißer 0,164 m löste keine Sperre aus → Medianfilter wirksam.
+
+**Interpretation:**
+- E1→E2 ≈ 1 Messtakt (100 ms): Der Median über 3 Werte braucht einen weiteren Wert unter der Schwelle.
+- E2→E3 0–50 ms: `obstacle_stop` sendet erst mit dem nächsten Befehl der Fahr-Node (20 Hz).
+- E3→E4 0–50 ms plus WLAN: Warten auf den 50-ms-Regeltakt des ESP32 plus Hin- und Rückweg.
+- Größter Anteil ist der Medianfilter – bewusster Kompromiss zwischen Robustheit gegen Ausreißer und Reaktionszeit.
+
+**Verbesserungen (nicht umgesetzt):** sofortiger Nullbefehl bei Sperre (spart 0–50 ms); kürzerer Messtakt (≥ 60 ms laut Datenblattempfehlung).
+
+### 08.10.2026 – 2.4 Stufe 10d: Akustische Abstandswarnung (Buzzer)
+
+**Konzept („Einparkhilfe“):** `/range` → `distance_warner` (Host) → `/buzzer` (`std_msgs/UInt16`) → ESP32 erzeugt den Ton.
+- Auswertung auf dem Host (Median über 3 Werte, Abstandsstufen als Parameter), Tonerzeugung lokal auf dem ESP32. Begründung: Würde der Host jeden Piep einzeln über WLAN schalten, wäre das Muster durch die WLAN-Schwankungen (vgl. 10a: 30–164 ms) ungleichmäßig.
+- Bedeutung `/buzzer`: 0 = aus, 1 = Dauerton, ≥ 2 = Pieptakt in ms (50 % an, mindestens 100 ms).
+- Stufen (Vorschlag): < 0,50 m 800 ms · < 0,35 m 400 ms · < 0,20 m 200 ms · < 0,10 m Dauerton.
+- Sicherheit wie bei den Motoren: ohne neue Nachricht für 1 s schaltet der ESP32 den Buzzer aus. `distance_warner` sendet bei jedem `/range`-Wert (10 Hz) und schaltet bei fehlenden Messwerten auf „aus“.
+- Eigene Node statt Erweiterung von `obstacle_stop`: Sicherheitsfunktion bleibt unverändert, Warnung getrennt abschaltbar (Parameter `enabled`).
+
+**Umsetzung:**
+- Firmware v4: zweiter Subscriber `/buzzer`, Executor mit 2 Handles, nicht blockierende Taktung `buzzerStep()` in `loop()`, Umschalten nur bei Zustandswechsel, Buzzer aus in `error_loop`.
+- Host: `shape_driver/distance_warner.py`, `config/distance_warner.yaml`, Entry Point in `setup.py`.
+
+**⚠ Fehler und Lösungen:**
+- Kein Ton, `ros2 topic info /buzzer` → „Unknown topic“: Auf dem ESP32 lief noch Firmware v3. Die neue Datei war nicht im Download-Ordner angekommen, der Kopierbefehl schlug fehl, und die anschließende `rm`-Zeile hatte die Quelle entfernt; der Upload kompilierte die alte `main.cpp`. Nachweis über den seriellen Monitor (Startmeldung ohne `/buzzer`). Lösung: Datei neu geladen, vor dem Löschen per `grep` geprüft. Lehre: Erst prüfen, dann aufräumen.
+- Nach erfolgreichem Upload „Unknown topic“: Agent war aus → ESP32 in der Fehlerschleife. Reihenfolge Agent → EN.
+- Vermutung „Buzzer nur mit Akku versorgt“ widerlegt: Der Buzzer funktioniert auch über USB.
+- Meldung `E (36029) ledc: ledc_get_duty(745): LEDC is not initialized` im seriellen Monitor (einmalig, ohne erkennbare Auswirkung). Vermutete Herkunft: `noTone()` des Arduino-Cores ohne aktiven Ton – nicht geprüft.
+
+**Tests:**
+- Direkt über `ros2 topic pub /buzzer`: Ton hörbar ✔ (Einzelprüfungen Takt/Dauerton/aus/Timeout laut Nutzer in Ordnung, nicht einzeln protokolliert).
+- `distance_warner` mit der Hand: Stufen aus → 800 ms → 400 ms ✔; an der 50-cm-Grenze mehrfacher Wechsel aus/800 ms (keine Hysterese in `distance_warner`).
+- Fahrt mit `obstacle_stop` + `distance_warner` + `calib_drive` (über `/cmd_vel_raw`, Start 0,586 m): aus → 800 ms → 400 ms → 200 ms ✔; `Takt 200 ms` (…089,9809) und `HINDERNIS 0,199 m` (…089,9810) im selben Moment – beide Nodes werten denselben `/range`-Wert mit demselben Median und derselben Schwelle aus. Roboter steht, Buzzer piept weiter im 200-ms-Takt.
+- Erster Fahrversuch vom Start bei 0,993 m mit 25 s Fahrdauer erreichte die 20-cm-Grenze rechnerisch nicht (Fahrweg 0,79 m) → Wiederholung mit 0,59 m Startabstand.
+- Nicht nachgewiesen: Dauerton-Stufe (< 0,10 m) über `distance_warner`.
+
+**Ergebnis ✔:** Akustische Abstandswarnung mit Auswertung auf dem Host und lokaler Tonerzeugung auf dem ESP32; arbeitet synchron mit dem Sicherheitsfilter.
+
 ---
 
 ## Offene Punkte
 
 **Technisch**
-- [ ] Stufe 10c: Reaktionszeit Hindernis → Stopp über Zeitstempel messen (Abschätzung aus 10b: ≈ 0,2 s)
-- [ ] Stufe 10d (optional): Buzzer als akustische Warnung
+- [ ] Anforderungen von Abschnitt 2.4 der Anleitung mit Stufe 10 abgleichen; klären, ob Stufe 11 nötig ist
+- [ ] Buzzer: Dauerton-Stufe (< 0,10 m) über `distance_warner` nachweisen
+- [ ] Buzzer: Ursache der LEDC-Meldung klären; ggf. LEDC direkt statt `tone()` ansteuern
+- [ ] Buzzer: Tonfrequenz an die Resonanz des Piezos anpassen (Lautstärke) – optional
+- [ ] `distance_warner`: Hysterese gegen Flattern an Stufengrenzen – optional
+- [ ] `obstacle_stop`: sofortiger Nullbefehl bei Sperre (−0…50 ms Reaktionszeit) – optional
 - [ ] Ultraschall: Ursache der Stufensprünge (3–12 mm) klären – z. B. Vergleich serieller Transport ohne WLAN
 - [ ] Ultraschall: Pegel ECHO (5 V an 3,3-V-Eingang) prüfen (Datenblatt/Messung, ggf. Spannungsteiler)
 - [ ] Ultraschall: inf-Fall praktisch testen (Freiraum > 4 m) – optional
@@ -753,7 +830,7 @@ Ursachen beobachtet, nicht gezielt nachgemessen. Folgerung: Der Sensor erkennt n
 
 ## Quellen
 
-- Praktikumsanleitung „Praktikum_2026“, Abschnitte 2.1–2.3, 4.1.1–4.1.4
+- Praktikumsanleitung „Praktikum_2026“, Abschnitte 2.1–2.4, 4.1.1–4.1.4, 4.2.2–4.2.3 (Tabelle 2: Pinbelegung)
 - ROS 2 Humble – Installation Ubuntu (deb packages): https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html
 - turtlesim Quellcode (Humble): https://github.com/ros/ros_tutorials/blob/humble/turtlesim/src/turtle.cpp
 - ROS 2 Humble – Creating a package: https://docs.ros.org/en/humble/Tutorials/Beginner-Client-Libraries/Creating-Your-First-ROS2-Package.html

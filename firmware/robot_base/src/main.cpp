@@ -9,6 +9,9 @@
 //   z = 1 bei Timeout, sonst 0
 // Stufe 10: Ultraschallsensor HC-SR04 (Trigger GPIO 26, Echo GPIO 25) – Messung alle 100 ms,
 // nicht blockierend über Interrupt am Echo-Pin, Veröffentlichung als sensor_msgs/Range auf /range.
+// Stufe 10d: passiver Piezo-Buzzer (GPIO 4 laut Anleitung 4.2.3). Subscriber /buzzer (std_msgs/UInt16):
+//   0 = aus, 1 = Dauerton, >= 2 = Pieptakt in ms (Periode, 50 % an); kleinere Werte als 100 -> 100.
+//   Ohne neue Nachricht für BUZZER_TIMEOUT_MS -> aus. Tonerzeugung lokal und nicht blockierend.
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -21,6 +24,7 @@
 #include <geometry_msgs/msg/twist.h>
 #include <geometry_msgs/msg/vector3.h>
 #include <sensor_msgs/msg/range.h>
+#include <std_msgs/msg/u_int16.h>
 #include <rmw_microros/rmw_microros.h>
 
 #if defined(MICRO_ROS_TRANSPORT_ARDUINO_WIFI)
@@ -73,6 +77,12 @@ static const float    US_MIN_RANGE_M     = 0.02f;  // typische Herstellerangabe 
 static const float    US_MAX_RANGE_M     = 4.0f;   // typische Herstellerangabe HC-SR04
 static const float    US_FIELD_OF_VIEW   = 0.26f;  // rad (ca. 15°, typische Herstellerangabe)
 
+// ---------- Buzzer (passiver Piezo, Pin laut Anleitung 4.2.3) ----------
+static const int      BUZZER_PIN            = 4;
+static const uint32_t BUZZER_FREQ_HZ        = 2000;   // Annahme; Resonanz des Piezos unbekannt -> ggf. anpassen
+static const uint32_t BUZZER_TIMEOUT_MS     = 1000;   // ohne neue Nachricht -> aus
+static const uint16_t BUZZER_PERIOD_MIN_MS  = 100;
+
 struct WheelCmd {
   uint8_t dir;
   uint16_t param;   // 0 = Stopp
@@ -86,6 +96,8 @@ geometry_msgs__msg__Vector3 wheel_cmd_msg;
 rcl_publisher_t range_pub;
 sensor_msgs__msg__Range range_msg;
 static char range_frame_id[] = "ultrasonic_link";
+rcl_subscription_t buzzer_sub;
+std_msgs__msg__UInt16 buzzer_msg;
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -113,6 +125,13 @@ UsState usState = US_IDLE;
 uint32_t usLastTriggerMs = 0;
 uint32_t usTriggerUs = 0;
 
+// Buzzer-Zustand
+uint16_t buzzerPeriodMs = 0;      // 0 = aus, 1 = Dauerton, sonst Periode
+uint32_t lastBuzzerMs = 0;
+bool buzzerReceived = false;
+uint32_t buzzerPhaseStartMs = 0;  // Beginn des Pieptakts (für gleichmäßiges Muster)
+bool buzzerOn = false;
+
 // ---------- Motor-UART ----------
 void sendMotorFrame(uint8_t id, uint8_t mode, uint8_t dir, uint16_t param) {
   uint8_t f[6] = {START_BYTE, id, mode, dir,
@@ -128,8 +147,21 @@ void stopMotors() {
   lastRight = {0, 0};
 }
 
+void setBuzzer(bool on) {
+  if (on == buzzerOn) {
+    return;                                 // nur bei Zustandswechsel umschalten
+  }
+  if (on) {
+    tone(BUZZER_PIN, BUZZER_FREQ_HZ);
+  } else {
+    noTone(BUZZER_PIN);
+  }
+  buzzerOn = on;
+}
+
 void error_loop(int line) {
   stopMotors();
+  setBuzzer(false);
   DBG("FEHLER: micro-ROS-Aufruf in Zeile %d fehlgeschlagen (Agent erreichbar?). Neustart mit EN.\n", line);
   while (1) {
     delay(100);
@@ -294,6 +326,37 @@ void cmd_vel_callback(const void *msgin) {
   cmdReceived = true;
 }
 
+void buzzer_callback(const void *msgin) {
+  const std_msgs__msg__UInt16 *msg = (const std_msgs__msg__UInt16 *)msgin;
+  if (msg->data != buzzerPeriodMs) {
+    buzzerPhaseStartMs = millis();          // neues Muster beginnt mit "an"
+  }
+  buzzerPeriodMs = msg->data;
+  lastBuzzerMs = millis();
+  buzzerReceived = true;
+}
+
+// Nicht blockierend, wird in jedem loop()-Durchlauf aufgerufen
+void buzzerStep() {
+  uint32_t now = millis();
+  uint16_t p = buzzerPeriodMs;
+  if (!buzzerReceived || now - lastBuzzerMs > BUZZER_TIMEOUT_MS) {
+    p = 0;                                  // Timeout -> aus
+  }
+  if (p == 0) {
+    setBuzzer(false);
+    return;
+  }
+  if (p == 1) {
+    setBuzzer(true);
+    return;
+  }
+  if (p < BUZZER_PERIOD_MIN_MS) {
+    p = BUZZER_PERIOD_MIN_MS;
+  }
+  setBuzzer((now - buzzerPhaseStartMs) % p < p / 2);
+}
+
 void setupTransport() {
 #if defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
   Serial.begin(115200);
@@ -321,6 +384,7 @@ void setup() {
   pinMode(US_TRIG_PIN, OUTPUT);
   digitalWrite(US_TRIG_PIN, LOW);
   pinMode(US_ECHO_PIN, INPUT);
+  noTone(BUZZER_PIN);                       // Buzzer definiert aus
 
   setupTransport();
   delay(2000);
@@ -345,15 +409,22 @@ void setup() {
     "range"));
   setupRangeMsg();
 
+  RCCHECK(rclc_subscription_init_default(
+    &buzzer_sub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16),
+    "buzzer"));
+
   // Zeit mit dem Agent abgleichen (für Zeitstempel in /range); Fehler ist nicht kritisch
   rmw_uros_sync_session(1000);
   DBG("Zeitabgleich mit Agent: %s\n", rmw_uros_epoch_synchronized() ? "ok" : "nicht verfuegbar");
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));  // 2 Subscriber
   RCCHECK(rclc_executor_add_subscription(
     &executor, &cmd_vel_sub, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &buzzer_sub, &buzzer_msg, &buzzer_callback, ON_NEW_DATA));
 
-  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, Publisher /wheel_cmd, /range\n");
+  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, Publisher /wheel_cmd, /range\n");
   lastControlMs = millis();
   usLastTriggerMs = millis();
   attachInterrupt(digitalPinToInterrupt(US_ECHO_PIN), echoIsr, CHANGE);
@@ -372,4 +443,5 @@ void loop() {
   }
 
   ultrasonicStep();
+  buzzerStep();
 }
