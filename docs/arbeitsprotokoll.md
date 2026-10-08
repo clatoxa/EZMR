@@ -15,7 +15,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 2.1 | ROS-2-Grundlagen, turtlesim | ✔ im Kern abgeschlossen |
 | 2.2 | Eigenes ROS-2-Paket (Fahrfolge in turtlesim) | ✔ Kernaufgabe erfüllt (Paket, Node, Launchfile, Parameterdatei) |
 | 2.3 | ESP32-Roboter über micro-ROS | ✔ Kernaufgabe erfüllt: `shape_driver` fährt das Viereck auf dem realen Roboter (micro-ROS über WLAN, Akku) |
-| 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ⏳ |
+| 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ⏳ in Arbeit: Ultraschall-Hinderniserkennung – Messung (10a) und Hinderniserkennung auf dem Host (10b) ✔ |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
 | 2.6 / OTA | FreeRTOS, OTA-Updates | optional, nicht ausgewählt |
 
@@ -32,7 +32,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 7 | Motorprotokoll: Einzelbefehle über UART an die ATtiny212 | 2.3 | ✔ (systematisch ermittelt) |
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
-| 10 | Sensorintegration | 2.4 | ⏳ als Nächstes |
+| 10 | Sensorintegration (HC-SR04) | 2.4 | ✔ 10a Messung, ✔ 10b Hinderniserkennung · ⏳ 10c Reaktionszeit, 10d Buzzer (optional) |
 | 11 | Eigenes Projekt mit Host-Auswertung | 2.4 | ⏳ |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
@@ -97,6 +97,18 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | Umrechnung `mode 1` | `param` [ms] = 125,8 / v [mm/s] |
 | Höchste geprüfte Radgeschwindigkeit | 62,9 mm/s (`param 2`) |
 | Kalibrierte Werte (`robot.yaml`) | `linear_speed` 0,03129 m/s, `angular_speed` 0,3692 rad/s (beide Räder `param 4`) |
+
+### Ultraschallsensor HC-SR04 (Stufe 10)
+
+| Merkmal | Wert | Grundlage |
+|---|---|---|
+| Anschluss | TRIG GPIO 26, ECHO GPIO 25 | Firmware v3, funktionsfähig |
+| Messtakt | 100 ms (10 Hz), Timeout 40 ms | Firmware v3; gemessen 10,000 Hz |
+| Umrechnung | Abstand = Pulsdauer · 343 m/s / 2 (c fest, ≈ 20 °C) | Annahme |
+| Messbereich / Öffnungswinkel | 0,02–4,0 m / 0,26 rad (≈ 15°) | typische Herstellerangaben, nicht geprüft |
+| Auflösung | 1 µs ≙ 0,17 mm | `micros()` |
+| Genauigkeit | ±1 cm bis 50 cm, −1,5 cm bei 100 cm | Stufe 10a |
+| Pegel ECHO | 5-V-Sensor an 3,3-V-Eingang – funktioniert, formal nicht geprüft | ⚠ offen |
 
 ---
 
@@ -618,12 +630,110 @@ Interpretation: Drift (systematisch, summiert sich) beseitigt; verbleibender Jit
 
 **Ergebnis ✔ (Pflichtaufgabe 2.3):** Die Node aus 2.2 steuert ohne Codeänderung – nur mit anderer Parameterdatei – den realen Roboter über micro-ROS (WLAN) und fährt das Viereck. Der Positionsfehler wurde durch empirische Kalibrierung von ≈ 35 mm auf ≈ 3 mm reduziert (Einzelfahrten). Es handelt sich um eine zeitgesteuerte Steuerung ohne Positionsrückführung.
 
+### 08.10.2026 – 2.4 Stufe 10: Auswahl Sensorprojekt
+
+**Entscheidung:** Ultraschallsensor HC-SR04 zur Hinderniserkennung. Aufteilung gemäß Aufgabenstellung: Erfassung auf dem ESP32 (Messung, Veröffentlichung als `sensor_msgs/Range`), Auswertung auf dem Host (Filterung, Entscheidung, Eingriff in die Fahrbefehle). Gliederung: 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d Buzzer (optional).
+
+### 08.10.2026 – 2.4 Stufe 10a: Ultraschallmessung (HC-SR04)
+
+**Umsetzung (Firmware v3, `firmware/robot_base`):**
+- Messung per Interrupt (`CHANGE` auf ECHO, Zeitstempel der steigenden und fallenden Flanke) statt `pulseIn()`, weil `pulseIn()` bis zu 40 ms blockiert und damit `spin_some` und den 50-ms-Regeltakt stören würde. Einzige aktive Wartezeit: 10-µs-Triggerimpuls.
+- Zustandsmaschine IDLE/WAIT_ECHO, Soll-Takt 100 ms (`lastTrigger += PERIOD`, wie in Stufe 9 gegen Drift).
+- Sonderwerte nach REP 117: `+inf` = Echo länger als Messbereich (kein Objekt), `−inf` = kürzer als 2 cm, `nan` = gar kein Echo (Sensorfehler).
+- Publisher `/range` (`sensor_msgs/Range`, `frame_id` `ultrasonic_link`); Zeitstempel über `rmw_uros_sync_session` / `rmw_uros_epoch_nanos()`.
+
+**Funktionstest (WLAN, USB-Versorgung, Roboter steht):**
+- `ros2 topic hz /range`: 10,000 Hz, min 0,030 s, max 0,164 s, σ 0,015 s (Fenster 128). Die Streuung entsteht vermutlich bei der WLAN-Übertragung (Takt auf dem ESP32 fest; nicht gemessen).
+- `header.stamp` gesetzt (Zeitabgleich funktioniert). Annäherung mit der Hand: stetig 0,36 m → 0,049 m und zurück.
+- Ruhewerte springen zwischen festen Stufen (z. B. 0,1470 / 0,1504 / 0,1605 m bei 15 cm), innerhalb einer Stufe ±0,17 mm (= 1 µs).
+
+**Genauigkeit** (Buch senkrecht, Maßband ab Vorderkante der Sensorkapseln, je 30 Werte, Auswertung per Pipeline `ros2 topic echo /range --field range | … | python3` → Median):
+
+| Soll | Median | Abweichung | Spannweite (max − min) |
+|---|---|---|---|
+| 10 cm | 0,1091 m | +0,9 cm | 0,2 mm |
+| 15 cm | 0,1504 m | +0,4 cm | ≈ 14 mm (Stufensprünge, Einzelwerte) |
+| 20 cm | 0,2089 m | +0,9 cm | 0,2 mm |
+| 30 cm | 0,3008 m | +0,1 cm | 5,5 mm |
+| 50 cm | 0,4991 m | −0,1 cm | 0,3 mm |
+| 100 cm | 0,9855 m | −1,5 cm | 4,6 mm |
+| frei (Tischkante ≈ 1,2 m) | 1,2019 m | – | 4,6 mm |
+
+Ein weiterer Lauf (Median 1,058 m, min 0,573 m) konnte keinem Abstand zugeordnet werden und wurde nicht ausgewertet.
+
+**Ergebnis ✔:** Bis 50 cm ±1 cm, bei 100 cm −1,5 cm; für Hinderniserkennung (Schwellen 20–25 cm) ausreichend.
+
+**Hypothesen (nicht geprüft):**
+- Stufensprünge: Empfänger löst bei unterschiedlichen Schwingungen des 40-kHz-Echos aus (Abstände passen nur teilweise zu 25 µs ≙ 4,3 mm) oder ISR-Latenz durch WLAN.
+- Abweichungen: Bezugspunkt liegt in der Kapsel statt an der Vorderkante (fester Versatz); Temperaturabhängigkeit der Schallgeschwindigkeit (abstandsproportional).
+
+**Nicht getestet:** `inf`-Fall (kein Freiraum > 4 m); Pegel ECHO (5 V an 3,3-V-Eingang) formal.
+
+### 08.10.2026 – 2.4 Stufe 10b: Hinderniserkennung mit Sicherheitsfilter (Host)
+
+**Problem:** Auf `/cmd_vel` darf nur ein Publisher aktiv sein (Erfahrung Stufe 9). Eine Stopp-Node parallel zur Fahr-Node würde abwechselnd Fahr- und Nullbefehle erzeugen.
+
+**Konzept:** Sicherheitsfilter („Gate“) zwischen Fahr-Node und Roboter:
+
+```
+shape_driver / calib_drive ──► /cmd_vel_raw ──► [obstacle_stop] ──► /cmd_vel ──► ESP32
+                                                       ▲
+                                         /range ───────┘
+```
+
+- Fahr-Nodes werden nur per Parameter umgeleitet (`-p cmd_vel_topic:=/cmd_vel_raw`), ohne Codeänderung.
+- `obstacle_stop` gibt Befehle unverändert weiter; bei Sperre wird nur `linear.x > 0` auf 0 gesetzt. Drehen und Rückwärtsfahren bleiben erlaubt (Roboter kann sich befreien).
+- Medianfilter über 3 Werte gegen Stufensprünge.
+- Hysterese: Sperre bei Median < 0,20 m, Freigabe erst bei > 0,25 m (kein Flattern an der Grenze).
+- Fail-safe: gesperrt bis zum ersten Messwert, bei > 0,5 s ohne `/range`-Wert, bei `−inf` und `nan` (als Abstand 0 behandelt).
+- Dateien: `shape_driver/obstacle_stop.py`, `config/obstacle_stop.yaml`, Entry Point in `setup.py`.
+
+**⚠ Fehler und Lösungen:**
+- `RCLError: publisher's context is invalid` bei Strg+C: Humble beendet den ROS-Kontext bei SIGINT selbst; der anschließende Stoppbefehl im `finally` scheitert. Lösung: Stoppbefehl nur bei `rclpy.ok()`; sonst stoppt der Firmware-Timeout (500 ms). Eigener Programmierfehler.
+- `TabError` nach manueller Änderung (Tabs und Leerzeichen gemischt) → Datei vollständig ersetzt.
+- Korrektur zunächst wirkungslos: Browser speicherte die neue Fassung als `obstacle_stop(1).py`, kopiert wurde die alte. Lösung: Inhalt per `grep` prüfen, alte Downloads löschen.
+
+**Test 1 – Trockentest** (WLAN, USB, Motoren im WLAN-Modus über USB ohne Funktion; Testbefehl `ros2 topic pub -r 10 /cmd_vel_raw …`):
+
+| Prüfung | Ergebnis |
+|---|---|
+| Hand < 20 cm → `linear.x` 0.0 | ✔ Auslösung bei 0,14–0,20 m |
+| Hysterese: Freigabe erst > 0,25 m | ✔ kleinster Freigabewert 0,263 m |
+| EN-Reset bzw. Agent gestoppt → Timeout-Sperre | ✔ Warnung, `linear.x` 0.0; nach Wiederverbindung frei |
+| Drehbefehl bei Sperre | ✔ `angular.z` 0,3 bleibt, nur `linear.x` → 0.0 |
+| `ros2 topic info /cmd_vel` | ✔ Publisher count 1, Subscription count 2 |
+| Beenden mit Strg+C | ✔ nach Korrektur ohne Fehler |
+
+**Test 2 – aufgebockt, Akku, USB getrennt:** Räder drehen vorwärts, stoppen sofort bei Hand < 20 cm, laufen bei Freigabe wieder an, stoppen nach Ende der Befehle (Firmware-Timeout) ✔.
+
+**Test 3 – Boden** (`calib_drive` mit `linear_speed 0.031447`, `duration 25` → Soll 0,79 m, über `/cmd_vel_raw`; Start 60 cm vor einer glatten Wand, Sensorwerte mitgeschrieben):
+- Startwert 0,6016 m (Markierung 60 cm). Während der Fahrt sinkt der Wert um ≈ 3 mm je Messung (≈ 30 mm/s, passt zu 31,4 mm/s). Einzelne Stufensprünge nach oben wurden vom Medianfilter abgefangen, keine Fehlauslösung.
+- Auslösung bei Median 0,200 m (Rohwerte 0,2031 → 0,1999 → 0,1967), danach ein weiterer Messwert 0,1935 m, dann konstant 0,1934–0,1936 m → Stillstand.
+- Endabstand Maßband = Sensorwert (≈ 19,4 cm), Roboter gerade zur Wand ✔.
+- Nachlauf ≈ 3 mm ab Auslösung bzw. ≈ 6 mm ab erstem Rohwert < 0,20 m → Reaktionszeit grob ≈ 0,2 s (genaue Messung: Stufe 10c).
+- Zwei weitere Fahrten unter gleichen Bedingungen bestätigten das Ergebnis (Einzelwerte nicht notiert).
+
+**Störfälle (Vorversuche, Grenzen des Ultraschalls):**
+
+| Versuch | Endabstand (Maßband) | Beobachtete Ursache |
+|---|---|---|
+| 1 | 13 cm | schlecht reflektierendes Hindernis |
+| 3 | 28 cm | kleines Objekt auf der Fahrstrecke im Schallkegel |
+
+Ursachen beobachtet, nicht gezielt nachgemessen. Folgerung: Der Sensor erkennt nur, was ausreichend Schall zurückwirft, und reagiert auf alles im ≈ 15° breiten Kegel – auch auf Objekte neben oder unter der Fahrlinie.
+
+**Ergebnis ✔:** Auswertung auf dem Host stoppt den realen Roboter zuverlässig vor einer Wand (≈ 19 cm bei Schwelle 20 cm) bei unverändertem Fahrprogramm. Die Fahr-Node bleibt unverändert; die Sicherheitslogik ist als eigene Node austauschbar.
+
 ---
 
 ## Offene Punkte
 
 **Technisch**
-- [ ] Stufe 10: Sensorprojekt auswählen und umsetzen (Erfassung ESP32, Auswertung Host)
+- [ ] Stufe 10c: Reaktionszeit Hindernis → Stopp über Zeitstempel messen (Abschätzung aus 10b: ≈ 0,2 s)
+- [ ] Stufe 10d (optional): Buzzer als akustische Warnung
+- [ ] Ultraschall: Ursache der Stufensprünge (3–12 mm) klären – z. B. Vergleich serieller Transport ohne WLAN
+- [ ] Ultraschall: Pegel ECHO (5 V an 3,3-V-Eingang) prüfen (Datenblatt/Messung, ggf. Spannungsteiler)
+- [ ] Ultraschall: inf-Fall praktisch testen (Freiraum > 4 m) – optional
 - [ ] Optional: Wiederholungen von K1/K2/Viereck zur Bestimmung der Streuung; K2 über 2 Umdrehungen
 - [ ] Optional: Hypothese Schrittverluste beim Richtungswechsel prüfen (Pause zwischen Phasen)
 - [ ] Automatische Wiederverbindung zum Agent (derzeit Reset per EN nötig) – optional
@@ -652,3 +762,4 @@ Interpretation: Drift (systematisch, summiert sich) beseitigt; verbleibender Jit
 - micro_ros_platformio: https://github.com/micro-ROS/micro_ros_platformio
 - PlatformIO – udev rules: https://docs.platformio.org/en/latest/core/installation/udev-rules.html
 - PlatformIO – Install Shell Commands: https://docs.platformio.org/en/latest/core/installation/shell-commands.html
+- REP 117 – Informational Distance Measurements (Sonderwerte inf/−inf/nan): https://www.ros.org/reps/rep-0117.html

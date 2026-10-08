@@ -7,6 +7,8 @@
 // Kontrolltopic /wheel_cmd (geometry_msgs/Vector3):
 //   x = linkes Rad, y = rechtes Rad: vorzeichenbehafteter param (+ vorwärts, - rückwärts, 0 Stopp)
 //   z = 1 bei Timeout, sonst 0
+// Stufe 10: Ultraschallsensor HC-SR04 (Trigger GPIO 26, Echo GPIO 25) – Messung alle 100 ms,
+// nicht blockierend über Interrupt am Echo-Pin, Veröffentlichung als sensor_msgs/Range auf /range.
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -18,6 +20,8 @@
 
 #include <geometry_msgs/msg/twist.h>
 #include <geometry_msgs/msg/vector3.h>
+#include <sensor_msgs/msg/range.h>
+#include <rmw_microros/rmw_microros.h>
 
 #if defined(MICRO_ROS_TRANSPORT_ARDUINO_WIFI)
 #include "secrets.h"            // lokal, nicht im Repository (Vorlage: secrets.h.example)
@@ -59,6 +63,16 @@ static const uint32_t CONTROL_PERIOD_MS = 50;
 static const uint32_t RESEND_PERIOD_MS  = 1000; // Befehl regelmäßig wiederholen (UART ohne Bestätigung)
 static const float    V_MAX             = STEP_DIST_M * 1000.0f / PARAM_MIN;  // ca. 0,063 m/s
 
+// ---------- Ultraschall HC-SR04 (Pins laut Anleitung 4.2.3) ----------
+static const int      US_TRIG_PIN        = 26;
+static const int      US_ECHO_PIN        = 25;
+static const uint32_t US_PERIOD_MS       = 100;    // 10 Hz (Datenblatt-Empfehlung: >= 60 ms Zyklus)
+static const uint32_t US_TIMEOUT_US      = 40000;  // ohne fallende Flanke -> Messung beenden
+static const float    US_SPEED_OF_SOUND  = 343.0f; // m/s bei ca. 20 °C (Annahme)
+static const float    US_MIN_RANGE_M     = 0.02f;  // typische Herstellerangabe HC-SR04
+static const float    US_MAX_RANGE_M     = 4.0f;   // typische Herstellerangabe HC-SR04
+static const float    US_FIELD_OF_VIEW   = 0.26f;  // rad (ca. 15°, typische Herstellerangabe)
+
 struct WheelCmd {
   uint8_t dir;
   uint16_t param;   // 0 = Stopp
@@ -69,6 +83,9 @@ rcl_subscription_t cmd_vel_sub;
 rcl_publisher_t wheel_cmd_pub;
 geometry_msgs__msg__Twist cmd_vel_msg;
 geometry_msgs__msg__Vector3 wheel_cmd_msg;
+rcl_publisher_t range_pub;
+sensor_msgs__msg__Range range_msg;
+static char range_frame_id[] = "ultrasonic_link";
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -85,6 +102,16 @@ WheelCmd lastRight = {0, 0};
 uint32_t lastSentLeftMs  = 0;
 uint32_t lastSentRightMs = 0;
 uint32_t lastControlMs = 0;
+
+// Ultraschall-Zustand (Variablen der ISR: volatile)
+volatile uint32_t echoRiseUs = 0;
+volatile uint32_t echoFallUs = 0;
+volatile bool echoRiseSeen = false;
+volatile bool echoDone = false;
+enum UsState { US_IDLE, US_WAIT_ECHO };
+UsState usState = US_IDLE;
+uint32_t usLastTriggerMs = 0;
+uint32_t usTriggerUs = 0;
 
 // ---------- Motor-UART ----------
 void sendMotorFrame(uint8_t id, uint8_t mode, uint8_t dir, uint16_t param) {
@@ -185,6 +212,79 @@ void controlStep() {
   RCSOFTCHECK(rcl_publish(&wheel_cmd_pub, &wheel_cmd_msg, NULL));
 }
 
+// ---------- Ultraschall ----------
+// Interrupt bei jeder Flanke am Echo-Pin: nur Zeitstempel merken (kurz halten!)
+void IRAM_ATTR echoIsr() {
+  uint32_t t = micros();
+  if (digitalRead(US_ECHO_PIN)) {
+    echoRiseUs = t;
+    echoRiseSeen = true;
+  } else if (echoRiseSeen) {
+    echoFallUs = t;
+    echoDone = true;
+  }
+}
+
+void publishRange(float rangeM) {
+  if (rmw_uros_epoch_synchronized()) {
+    int64_t ns = rmw_uros_epoch_nanos();
+    range_msg.header.stamp.sec = (int32_t)(ns / 1000000000LL);
+    range_msg.header.stamp.nanosec = (uint32_t)(ns % 1000000000LL);
+  }
+  range_msg.range = rangeM;
+  RCSOFTCHECK(rcl_publish(&range_pub, &range_msg, NULL));
+}
+
+// Nicht blockierender Messablauf, wird in jedem loop()-Durchlauf aufgerufen
+void ultrasonicStep() {
+  uint32_t nowMs = millis();
+  if (usState == US_IDLE) {
+    if (nowMs - usLastTriggerMs < US_PERIOD_MS) {
+      return;
+    }
+    usLastTriggerMs += US_PERIOD_MS;                 // Soll-Takt halten
+    if (nowMs - usLastTriggerMs >= US_PERIOD_MS) {
+      usLastTriggerMs = nowMs;
+    }
+    echoRiseSeen = false;
+    echoDone = false;
+    digitalWrite(US_TRIG_PIN, HIGH);                 // 10-µs-Triggerimpuls (einzige kurze Wartezeit)
+    delayMicroseconds(10);
+    digitalWrite(US_TRIG_PIN, LOW);
+    usTriggerUs = micros();
+    usState = US_WAIT_ECHO;
+    return;
+  }
+
+  // US_WAIT_ECHO
+  if (echoDone) {
+    uint32_t pulseUs = echoFallUs - echoRiseUs;
+    float d = (float)pulseUs * 1e-6f * US_SPEED_OF_SOUND / 2.0f;   // Hin- und Rückweg
+    if (d > US_MAX_RANGE_M) {
+      d = INFINITY;                                  // REP 117: kein Objekt im Messbereich
+    } else if (d < US_MIN_RANGE_M) {
+      d = -INFINITY;                                 // REP 117: zu nah
+    }
+    publishRange(d);
+    usState = US_IDLE;
+  } else if (micros() - usTriggerUs > US_TIMEOUT_US) {
+    // Echo begann, endete aber nicht rechtzeitig -> außerhalb Messbereich;
+    // gar kein Echo -> Messung ungültig
+    publishRange(echoRiseSeen ? INFINITY : NAN);
+    usState = US_IDLE;
+  }
+}
+
+void setupRangeMsg() {
+  range_msg.header.frame_id.data = range_frame_id;
+  range_msg.header.frame_id.size = strlen(range_frame_id);
+  range_msg.header.frame_id.capacity = sizeof(range_frame_id);
+  range_msg.radiation_type = sensor_msgs__msg__Range__ULTRASOUND;
+  range_msg.field_of_view = US_FIELD_OF_VIEW;
+  range_msg.min_range = US_MIN_RANGE_M;
+  range_msg.max_range = US_MAX_RANGE_M;
+}
+
 // ---------- Callback: nur speichern ----------
 void cmd_vel_callback(const void *msgin) {
   const geometry_msgs__msg__Twist *msg = (const geometry_msgs__msg__Twist *)msgin;
@@ -217,6 +317,11 @@ void setup() {
   Serial2.begin(MOTOR_BAUD, SERIAL_8N1, MOTOR_RX_PIN, MOTOR_TX_PIN);
   stopMotors();
 
+  // Ultraschall-Pins
+  pinMode(US_TRIG_PIN, OUTPUT);
+  digitalWrite(US_TRIG_PIN, LOW);
+  pinMode(US_ECHO_PIN, INPUT);
+
   setupTransport();
   delay(2000);
 
@@ -234,12 +339,24 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
     "wheel_cmd"));
 
+  RCCHECK(rclc_publisher_init_default(
+    &range_pub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+    "range"));
+  setupRangeMsg();
+
+  // Zeit mit dem Agent abgleichen (für Zeitstempel in /range); Fehler ist nicht kritisch
+  rmw_uros_sync_session(1000);
+  DBG("Zeitabgleich mit Agent: %s\n", rmw_uros_epoch_synchronized() ? "ok" : "nicht verfuegbar");
+
   RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &cmd_vel_sub, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
 
-  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, Publisher /wheel_cmd\n");
+  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, Publisher /wheel_cmd, /range\n");
   lastControlMs = millis();
+  usLastTriggerMs = millis();
+  attachInterrupt(digitalPinToInterrupt(US_ECHO_PIN), echoIsr, CHANGE);
 }
 
 void loop() {
@@ -253,4 +370,6 @@ void loop() {
     }
     controlStep();
   }
+
+  ultrasonicStep();
 }

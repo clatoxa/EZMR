@@ -1,0 +1,9 @@
+obstacle_stop:
+  ros__parameters:
+    input_topic: /cmd_vel_raw
+    output_topic: /cmd_vel
+    range_topic: /range
+    stop_distance: 0.20      # m, Vorschlag
+    release_distance: 0.25   # m, Vorschlag
+    range_timeout: 0.5       # s
+    median_window: 3
