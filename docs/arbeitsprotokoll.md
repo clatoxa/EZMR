@@ -34,7 +34,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
 | 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
-| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort) |
+| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort), 11g Scheinhindernisse = Bodenecho (Abhilfe offen) |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
 ---
@@ -1007,9 +1007,51 @@ Host: obstacle_stop abonniert /bumper → vorwärts gesperrt, /robot_state = 4 (
 - IMU-Summe (+15,9°) und Beobachtung am Boden (≈ 12°, Schätzung mit dem Auge) stimmen grob überein → die IMU erfasst auch das Nachdrehen.
 - Fester Vorhalt gleicht nur den Mittelwert aus; Streuung bleibt (Lauf 1/2: ±1,5–2°). Direkt auf `/cmd_vel` war das Nachdrehen sehr gleichmäßig (3,42–3,81°) gegenüber 1,6–4,6° über `obstacle_stop` – Hinweis (n = 4 je Fahrt), dass die zusätzliche Weiterleitung schwankende Verzögerung beiträgt; nicht nachgewiesen.
 
-**⚠ Scheinhindernisse:** In allen Fahrten über `obstacle_stop` (A, A2, B, B2) sperrte `HINDERNIS` (0,16–0,18 m) die Vorwärtsfahrt **fast über die ganze Seite 2 und 4**, obwohl die Fläche laut Nutzer frei war. Der Roboter fuhr dann nur Seite 1 und 3 (hin und zurück) und endete trotzdem nahe am Start → frühere Positionswerte (2–4 cm) **ungültig**, Winkelwerte gültig (Drehen ist bei Sperre erlaubt). Vermutung lose Bumper-Kabel im Schallkegel: Kabel befestigt, Sperren blieben → nicht (allein) die Ursache. Ursache offen. Nebenbefund B2 (…1075): `/range` und `/bumper` gleichzeitig ausgeblieben → vermutlich kurze WLAN-Unterbrechung, Filter sperrte korrekt (fail-safe).
+**⚠ Scheinhindernisse:** In allen Fahrten über `obstacle_stop` (A, A2, B, B2) sperrte `HINDERNIS` (0,16–0,18 m) die Vorwärtsfahrt **fast über die ganze Seite 2 und 4**, obwohl die Fläche laut Nutzer frei war. Der Roboter fuhr dann nur Seite 1 und 3 (hin und zurück) und endete trotzdem nahe am Start → frühere Positionswerte (2–4 cm) **ungültig**, Winkelwerte gültig (Drehen ist bei Sperre erlaubt). Vermutung lose Bumper-Kabel im Schallkegel: Kabel befestigt, Sperren blieben → nicht (allein) die Ursache. Ursache in Stufe 11g geklärt (Bodenecho an Dielenfugen). Nebenbefund B2 (…1075): `/range` und `/bumper` gleichzeitig ausgeblieben → vermutlich kurze WLAN-Unterbrechung, Filter sperrte korrekt (fail-safe).
 
 **Bewertung:** Mit 4° Vorhalt liegt jede Ecke innerhalb ±2,1° (über `obstacle_stop`) bzw. ±0,7° (direkt). Unter gleichen Bedingungen (gleicher Boden, Akku) sind Zeitsteuerung (kalibriert in 9b) und IMU-Regelung gleichwertig; der erwartete Vorteil der Rückführung bei veränderten Bedingungen (Untergrund, Akkuspannung, Schlupf) ist **Hypothese, nicht nachgewiesen**. Die erreichbare Genauigkeit wird durch das Zeitverhalten der Übertragung begrenzt (Vorhalt nötig, Streuung), nicht durch den Sensor.
+
+### 09.10.2026 – Stufe 11g: Ursache der Scheinhindernisse (Bodenecho)
+
+**Ziel:** Ursache der Sperren 0,16–0,18 m auf Seite 2 und 4 (11f-c) klären. Auffällig: Seite 2 und 4 zeigen in **entgegengesetzte** Richtungen (90°/270°), Seite 1 und 3 waren nie betroffen.
+
+**Hypothesen:** H1 Gegenstand im Raum · H2 Bodenstruktur (Fugen quer zur Schallrichtung) · H3 Bauteil am Roboter im Schallkegel (Bumper, Kabel) · H4 zeitliche Störung nach dem Drehen.
+
+**Werkzeug:** `tools/range_scan.py` (neu) – Roboter dreht auf der Stelle (nur `angular.z` = 0,3692 rad/s über `/cmd_vel_raw` → `obstacle_stop`), jeder `/range`-Wert wird mit dem Gierwinkel aus `/imu` gespeichert; Ausgabe je 15°-Sektor (Median/Min/Max, Anzahl nan/inf), Rohdaten als CSV. Winkel gegen den Uhrzeigersinn ab Startausrichtung (0° = Seite 1, 90° = Seite 2, 270° = Seite 4).
+Erster Versuch: Roboter bewegte sich nicht → `ros2 node list` zeigte nur `/robot_base`; `obstacle_stop` war nicht gestartet (Befehle auf `/cmd_vel_raw` wurden nicht weitergeleitet). Nach Start lief das Skript wie vorgesehen.
+
+**Untergrund:** Laminat/Vinyl in Dielenoptik; Startausrichtung (Seite 1/3) **parallel** zu den langen Fugen, Seite 2/4 **quer** dazu (Foto). Sensorhöhe über dem Boden ≈ **2,5 cm**.
+
+**Scan an der Startposition** (ohne Hindernisse im Umkreis, 178 Werte; Auszug):
+
+| Richtung | Median | Min | Bemerkung |
+|---|---|---|---|
+| 0–15° (Seite 1) | 3,454 m | 3,448 m | Raum |
+| 75–90° | 0,230 m | 0,208 m | schmaler Einbruch (Seite 2) |
+| 90–105° | 0,506 m | 0,206 m | |
+| 165–195° (Seite 3) | ≈ 0,67 m | 0,669 m | Raum |
+| 255–270° | **0,179 m** | **0,164 m** | ◄ unter Stoppschwelle (Seite 4) |
+| 270–285° | 0,300 m | 0,166 m | |
+| 315–360° | ≈ 3,45 m | | Raum |
+
+Wiederholung (Drehung um 270°, `--umdrehungen 0.75`): Sektoren 0–270° praktisch gleich (z. B. 75–90°: Median 0,212 m, Min 0,194 m; 255–270°: Min 0,161 m) → **reproduzierbar**. Im Stand bei 270,8° konstant **0,302–0,307 m** (≈ 5 s).
+
+**Prüfungen in Richtung 270° (Roboter unverändert):**
+
+| Versuch | `/range` | Aussage |
+|---|---|---|
+| Ausgangszustand | 0,302–0,307 m | stabiles Echo |
+| Sichtprüfung | nichts im Raum vor dem Sensor | H1 ✗ |
+| Zollstock: Sensor → zweite Fuge | **30 cm** | entspricht dem Messwert |
+| Blatt Papier flach auf den Boden | 0,172–0,176 m | Echo hängt vom Boden ab (Blattkante/Wölbung als neue Kante – Deutung) |
+| Blatt weg, Vorderseite 1–2 cm unterlegt (Sensor wenige Grad nach oben) | 0,449–0,454 m | Abstand wandert mit der Neigung → Bodenecho |
+
+**Ergebnis:** H3 ✗ (nahe Werte nur in zwei Richtungen, sonst bis 3,45 m), H1 ✗ (nichts im Raum; Messwert = Abstand zur Fuge). Alle Versuche passen zu **H2**: Der Sensor sitzt nur ≈ 2,5 cm über dem Boden, der untere Teil des Schallkegels trifft den Boden. **Fugen quer zur Schallrichtung** werfen genug Schall zurück und werden als Hindernis gemessen; parallel zu den Fugen (Seite 1/3) nicht. Beim Drehen kurzzeitig 0,16–0,18 m (nähere Fuge bzw. Fugenstoß), im Stand 0,30 m. Geometrie zur Einordnung: eine Fuge in 30 cm liegt nur ≈ 4,8° (atan 2,5/30), eine in 17 cm ≈ 8,4° unter der Sensorachse. H4 durch die Versuche nicht geprüft, für die Erklärung nicht nötig.
+
+**Folgen:**
+- Positionsangaben der Viereckfahrten über `obstacle_stop` (11f-c) bleiben ungültig; die Sperren waren **korrektes Verhalten des Filters** auf ein falsches Sensorsignal (fail-safe-Richtung: lieber stehen als fahren).
+- Senken von `stop_distance` ist keine Abhilfe (Scheinwerte bis 0,161 m; echte Hindernisse würden zu spät erkannt).
+- Mögliche Abhilfe: Sensor dauerhaft leicht nach oben neigen und/oder höher montieren; Erfolg mit `range_scan.py` an derselben Stelle prüfen (kein Sektor-Median < 0,25 m) und Gegenprobe mit niedrigem Hindernis in 20 cm. Alternativ als Einschränkung dokumentieren (Fahrten parallel zu Fugen bzw. auf fugenfreiem Untergrund).
 
 ---
 
@@ -1018,7 +1060,8 @@ Host: obstacle_stop abonniert /bumper → vorwärts gesperrt, /robot_state = 4 (
 **Technisch**
 - [x] Firmware v5.1: Fehleranzeige, Buzzer-Pin, Startbild Modus 0 (09.10.2026)
 - [x] Grundlast der Schleife: Ursache reliable-Publisher über WLAN, mit best effort weitgehend behoben (11f-b)
-- [ ] Scheinhindernisse 0,16–0,18 m bei Fahrten über `obstacle_stop` (Seiten 2 und 4) klären: `/range` beobachten, während der Roboter gesperrt steht; Umgebung/Boden/Schallkegel prüfen
+- [x] Scheinhindernisse 0,16–0,18 m (Seiten 2 und 4): Ursache Bodenecho an Dielenfugen quer zur Schallrichtung, Sensorhöhe 2,5 cm (11g)
+- [ ] Abhilfe Bodenecho: Sensor leicht nach oben neigen/höher montieren, mit `range_scan.py` und niedrigem Hindernis prüfen; danach Viereck über `obstacle_stop` wiederholen (Positionswerte)
 - [ ] IMU gegen Zeit bei veränderten Bedingungen (anderer Untergrund, schwächerer Akku) – Nutzen der Rückführung nachweisen (optional)
 - [ ] Regelschritt in eigene periodische Task (`vTaskDelayUntil`) statt Prüfung in `loop()` – Verspätung um bis zu einen Durchlauf beseitigen (optional; micro-ROS-Aufrufe bleiben in `loop()`)
 - [ ] IMU: Zahlenwerte größter Abtastabstand (I4) nachtragen; Magnetometer direkt prüfen (Bypass + Scan 0x0C) – optional
