@@ -35,6 +35,16 @@
 //   loop() veröffentlicht /bumper (std_msgs/UInt8, Bit 0 links, Bit 1 rechts) bei Änderung und alle 200 ms;
 //   Auswertung auf dem Host (obstacle_stop). Lokal zusätzlich: keine Vorwärtsfahrt bei gedrücktem Bumper.
 //   Serielle Ausgaben aus mehreren Tasks durch Mutex geschützt (2.6 Punkt 2).
+// v7 (Stufe 11f): IMU MPU-6500 (I2C 0x68, WHO_AM_I 0x70) – Gyroskop ±250 °/s, Beschleunigung ±2 g.
+//   imuTask (Kern 0, Prio 3) tastet periodisch mit vTaskDelayUntil alle 10 ms ab, korrigiert den Nullpunkt
+//   (Kalibrierung 3 s im Stillstand beim Start) und integriert den Gierwinkel mit der tatsächlichen Zeit.
+//   I2C wird jetzt von zwei Tasks genutzt -> i2cMutex. Das Display überträgt sein Bild seitenweise
+//   (8 x 128 Byte) und gibt den Bus zwischen den Seiten frei, damit die IMU höchstens eine Seite warten muss.
+//   loop() veröffentlicht /imu (sensor_msgs/Imu, frame imu_link) alle 50 ms: Gier als Quaternion,
+//   Drehraten [rad/s], Beschleunigungen [m/s^2]. Roll/Nick werden nicht geschätzt (große Kovarianz).
+// v7.1: STREAM_BEST_EFFORT 1 -> /range, /wheel_cmd, /imu als "best effort" (keine Bestätigung, kein Warten);
+//       /bumper und /loop_diag bleiben "reliable". Host-Subscriber müssen best effort akzeptieren
+//       (qos_profile_sensor_data), sonst kommt keine Verbindung zustande. 0 = alles reliable (wie v7).
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -47,6 +57,7 @@
 #include <geometry_msgs/msg/twist.h>
 #include <geometry_msgs/msg/vector3.h>
 #include <sensor_msgs/msg/range.h>
+#include <sensor_msgs/msg/imu.h>
 #include <std_msgs/msg/u_int16.h>
 #include <std_msgs/msg/u_int8.h>
 #include <Wire.h>
@@ -121,6 +132,15 @@ static const uint16_t BUZZER_PERIOD_MIN_MS  = 100;
 #endif
 #define DISPLAY_IN_TASK (DISPLAY_MODE == 1)
 #define DISPLAY_IN_LOOP (DISPLAY_MODE == 2)
+
+#ifndef STREAM_BEST_EFFORT
+#define STREAM_BEST_EFFORT 1                          // 1 = Sensorströme best effort, 0 = reliable (v7)
+#endif
+#if STREAM_BEST_EFFORT
+#define STREAM_PUB_INIT rclc_publisher_init_best_effort
+#else
+#define STREAM_PUB_INIT rclc_publisher_init_default
+#endif
 static const int      I2C_SDA_PIN           = 21;     // Anleitung 4.2.3
 static const int      I2C_SCL_PIN           = 22;
 static const uint8_t  DISPLAY_ADDR_7BIT     = 0x3C;   // I2C-Scan + Lötbrücke "0x78"
@@ -135,6 +155,16 @@ static const int      BUMPER_RIGHT_PIN      = 14;     // JP3
 static const uint32_t BUMPER_RELEASE_MS     = 100;    // HIGH muss so lange stabil sein (Prellen gemessen: 55 ms LOW)
 static const uint32_t BUMPER_PUB_PERIOD_MS  = 200;
 
+// ---------- IMU (v7, Stufe 11f-a) ----------
+static const uint8_t  IMU_ADDR              = 0x68;
+static const float    GYRO_LSB_PER_DPS      = 131.0f;    // ±250 °/s
+static const float    ACCEL_LSB_PER_G       = 16384.0f;  // ±2 g
+static const float    G_MPS2                = 9.80665f;
+static const uint32_t IMU_PERIOD_MS         = 10;        // 100 Hz
+static const uint32_t IMU_CALIB_MS          = 3000;      // Stillstand beim Start
+static const uint32_t IMU_PUB_PERIOD_MS     = 50;        // 20 Hz
+static const uint32_t I2C_WAIT_MS           = 20;        // max. Wartezeit auf den Bus
+
 struct WheelCmd {
   uint8_t dir;
   uint16_t param;   // 0 = Stopp
@@ -148,6 +178,9 @@ geometry_msgs__msg__Vector3 wheel_cmd_msg;
 rcl_publisher_t range_pub;
 sensor_msgs__msg__Range range_msg;
 static char range_frame_id[] = "ultrasonic_link";
+rcl_publisher_t imu_pub;
+sensor_msgs__msg__Imu imu_msg;
+static char imu_frame_id[] = "imu_link";
 rcl_subscription_t buzzer_sub;
 std_msgs__msg__UInt16 buzzer_msg;
 rcl_subscription_t state_sub;
@@ -206,6 +239,22 @@ struct DisplayData {
   uint32_t ctrlMaxUs;
 };
 DisplayData dispData = {NAN, 0, 0, 0, 0, 0, true, 0, 0, 0};
+
+// IMU-Daten: geschrieben von imuTask, gelesen von loop() und Display
+struct ImuData {
+  bool     valid;
+  float    yawDeg;          // integrierter Gierwinkel seit Start [°], gegen Uhrzeigersinn positiv
+  float    gx, gy, gz;      // Drehraten, nullpunktkorrigiert [°/s]
+  float    ax, ay, az;      // Beschleunigung [g]
+  int64_t  stampNs;         // Zeitstempel (Epoch, nach Zeitabgleich) der Messung
+  uint32_t maxDtUs;         // größter Abtastabstand seit letzter Abfrage
+  uint32_t errors;          // I2C-Lesefehler gesamt
+};
+ImuData imuData = {false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+SemaphoreHandle_t imuMutex = NULL;   // schützt imuData
+SemaphoreHandle_t i2cMutex = NULL;   // schützt den I2C-Bus (Display + IMU)
+TaskHandle_t imuTaskHandle = NULL;
+float gyroBias[3] = {0, 0, 0};       // °/s
 SemaphoreHandle_t dispMutex = NULL;   // schützt dispData
 TaskHandle_t displayTaskHandle = NULL;
 
@@ -566,11 +615,30 @@ void drawDisplay(const DisplayData &d) {
     oled.drawStr(0, 46, line);
   }
 
-  // Zeile 5: Diagnose Zeitverhalten
-  snprintf(line, sizeof(line), "loop %.1f ctl %.1f ms", d.loopMaxUs / 1000.0f, d.ctrlMaxUs / 1000.0f);
+  // Zeile 5: Gierwinkel (IMU) und Laufzeitdiagnose
+  {
+    ImuData im;
+    bool ok = false;
+    if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+      im = imuData;
+      ok = true;
+      xSemaphoreGive(imuMutex);
+    }
+    if (ok && im.valid) {
+      snprintf(line, sizeof(line), "Gier %+6.1f  L%3.0fms", im.yawDeg, d.loopMaxUs / 1000.0f);
+    } else {
+      snprintf(line, sizeof(line), "IMU --  L%3.0fms", d.loopMaxUs / 1000.0f);
+    }
+  }
   oled.drawStr(0, 60, line);
 
-  oled.sendBuffer();                         // ca. 32 ms bei 400 kHz
+  // Seitenweise Übertragung (8 Zeilen à 8 Pixel = 128 Byte, je ca. 4 ms), Bus zwischen den Seiten frei
+  for (uint8_t row = 0; row < 8; row++) {
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      oled.updateDisplayArea(0, row, 16, 1);
+      xSemaphoreGive(i2cMutex);
+    }
+  }
 }
 
 void copyDisplayData(DisplayData &out) {
@@ -602,7 +670,7 @@ void setupDisplay() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tf);
   oled.sendBuffer();
-  showScreen("robot_base v6", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
+  showScreen("robot_base v7.1", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
 }
 
 // ---------- Bumper: Interrupt -> Semaphore -> Task (v6) ----------
@@ -675,6 +743,167 @@ void bumperPublishStep() {
   }
 }
 
+// ---------- IMU (v7) ----------
+// Registerzugriffe: nur unter i2cMutex bzw. vor dem Start der Tasks aufrufen
+bool imuWrite(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(IMU_ADDR);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+bool imuReadRaw(int16_t v[7]) {              // ax ay az temp gx gy gz
+  Wire.beginTransmission(IMU_ADDR);
+  Wire.write(0x3B);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)IMU_ADDR, 14) != 14) return false;
+  for (int i = 0; i < 7; i++) {
+    uint8_t hi = Wire.read();
+    uint8_t lo = Wire.read();
+    v[i] = (int16_t)((hi << 8) | lo);
+  }
+  return true;
+}
+
+// Initialisierung und Nullpunkt (in setup(), vor dem Start der Tasks, Roboter muss stillstehen)
+bool setupImu() {
+  Wire.beginTransmission(IMU_ADDR);
+  Wire.write(0x75);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom((int)IMU_ADDR, 1) != 1) {
+    DBG("IMU: keine Antwort\n");
+    return false;
+  }
+  uint8_t who = Wire.read();
+  bool ok = imuWrite(0x6B, 0x00);            // wecken
+  delay(100);
+  ok &= imuWrite(0x6B, 0x01);                // Takt vom Gyroskop (PLL)
+  ok &= imuWrite(0x1A, 0x03);                // DLPF_CFG 3
+  ok &= imuWrite(0x1B, 0x00);                // ±250 °/s
+  ok &= imuWrite(0x1C, 0x00);                // ±2 g
+  delay(100);
+  showScreen("IMU kalibriert ...", "Roboter NICHT", "bewegen (3 s)", NULL);
+  double sum[3] = {0, 0, 0};
+  int n = 0;
+  uint32_t t0 = millis();
+  while (millis() - t0 < IMU_CALIB_MS) {
+    int16_t v[7];
+    if (imuReadRaw(v)) {
+      for (int i = 0; i < 3; i++) sum[i] += v[4 + i] / GYRO_LSB_PER_DPS;
+      n++;
+    }
+    delay(5);
+  }
+  if (n > 0) {
+    for (int i = 0; i < 3; i++) gyroBias[i] = (float)(sum[i] / n);
+  }
+  DBG("IMU: WHO_AM_I 0x%02X, Konfiguration %s, Nullpunkt gz %+.4f °/s (n = %d)\n",
+      who, ok ? "ok" : "FEHLER", gyroBias[2], n);
+  return ok && n > 0;
+}
+
+// Periodische Task: feste Abtastrate mit vTaskDelayUntil (kein Drift)
+void imuTask(void *arg) {
+  (void)arg;
+  TickType_t lastWake = xTaskGetTickCount();
+  uint32_t lastUs = micros();
+  float yaw = 0.0f;
+  for (;;) {
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(IMU_PERIOD_MS));
+    int16_t v[7];
+    bool ok = false;
+    uint32_t nowUs = 0;
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(I2C_WAIT_MS)) == pdTRUE) {
+      nowUs = micros();                      // Zeitpunkt der Messung (nach Erhalt des Busses)
+      ok = imuReadRaw(v);
+      xSemaphoreGive(i2cMutex);
+    }
+    if (!ok) {
+      if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+        imuData.errors++;
+        xSemaphoreGive(imuMutex);
+      }
+      continue;
+    }
+    uint32_t dtUs = nowUs - lastUs;
+    lastUs = nowUs;
+    float gx = v[4] / GYRO_LSB_PER_DPS - gyroBias[0];
+    float gy = v[5] / GYRO_LSB_PER_DPS - gyroBias[1];
+    float gz = v[6] / GYRO_LSB_PER_DPS - gyroBias[2];
+    if (dtUs < 100000) {                     // nach langer Pause (z. B. Busfehler) nicht integrieren
+      yaw += gz * dtUs * 1e-6f;
+    }
+    int64_t stamp = rmw_uros_epoch_synchronized() ? rmw_uros_epoch_nanos() : 0;
+    if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+      imuData.valid = true;
+      imuData.yawDeg = yaw;
+      imuData.gx = gx; imuData.gy = gy; imuData.gz = gz;
+      imuData.ax = v[0] / ACCEL_LSB_PER_G;
+      imuData.ay = v[1] / ACCEL_LSB_PER_G;
+      imuData.az = v[2] / ACCEL_LSB_PER_G;
+      imuData.stampNs = stamp;
+      if (dtUs > imuData.maxDtUs) imuData.maxDtUs = dtUs;
+      xSemaphoreGive(imuMutex);
+    }
+  }
+}
+
+void setupImuMsg() {
+  imu_msg.header.frame_id.data = imu_frame_id;
+  imu_msg.header.frame_id.size = strlen(imu_frame_id);
+  imu_msg.header.frame_id.capacity = sizeof(imu_frame_id);
+  // Kovarianzen: Roll/Nick nicht geschätzt -> sehr groß; Gier und Raten grob aus Stufe 11f-a
+  for (int i = 0; i < 9; i++) {
+    imu_msg.orientation_covariance[i] = 0.0;
+    imu_msg.angular_velocity_covariance[i] = 0.0;
+    imu_msg.linear_acceleration_covariance[i] = 0.0;
+  }
+  imu_msg.orientation_covariance[0] = 1e6;
+  imu_msg.orientation_covariance[4] = 1e6;
+  imu_msg.orientation_covariance[8] = 1e-3;                 // Annahme (Drift ~0,3 °/min)
+  double gyroVar = pow(0.1 * M_PI / 180.0, 2);               // Std 0,1 °/s (gemessen)
+  imu_msg.angular_velocity_covariance[0] = gyroVar;
+  imu_msg.angular_velocity_covariance[4] = gyroVar;
+  imu_msg.angular_velocity_covariance[8] = gyroVar;
+}
+
+// /imu veröffentlichen (nur aus loop())
+uint32_t lastImuPubMs = 0;
+uint32_t lastImuDiagMs = 0;
+void imuPublishStep() {
+  uint32_t now = millis();
+  if (now - lastImuPubMs < IMU_PUB_PERIOD_MS) return;
+  lastImuPubMs = now;
+  ImuData im;
+  if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(2)) != pdTRUE) return;
+  im = imuData;
+  bool printDiag = (now - lastImuDiagMs >= 10000);
+  if (printDiag) {
+    imuData.maxDtUs = 0;                     // Maximum für die nächsten 10 s neu bestimmen
+  }
+  xSemaphoreGive(imuMutex);
+  if (printDiag) {
+    lastImuDiagMs = now;
+    DBG("IMU: Gier %+.2f°, größter Abtastabstand %lu us (Soll %lu), Lesefehler %lu\n",
+        im.yawDeg, (unsigned long)im.maxDtUs, (unsigned long)(IMU_PERIOD_MS * 1000),
+        (unsigned long)im.errors);
+  }
+  if (!im.valid) return;
+  imu_msg.header.stamp.sec = (int32_t)(im.stampNs / 1000000000LL);
+  imu_msg.header.stamp.nanosec = (uint32_t)(im.stampNs % 1000000000LL);
+  double yawRad = im.yawDeg * M_PI / 180.0;
+  imu_msg.orientation.x = 0.0;
+  imu_msg.orientation.y = 0.0;
+  imu_msg.orientation.z = sin(yawRad / 2.0);
+  imu_msg.orientation.w = cos(yawRad / 2.0);
+  imu_msg.angular_velocity.x = im.gx * M_PI / 180.0;
+  imu_msg.angular_velocity.y = im.gy * M_PI / 180.0;
+  imu_msg.angular_velocity.z = im.gz * M_PI / 180.0;
+  imu_msg.linear_acceleration.x = im.ax * G_MPS2;
+  imu_msg.linear_acceleration.y = im.ay * G_MPS2;
+  imu_msg.linear_acceleration.z = im.az * G_MPS2;
+  RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
+}
+
 void setupTransport() {
 #if defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
   Serial.begin(115200);
@@ -712,7 +941,11 @@ void setup() {
   pinMode(BUMPER_RIGHT_PIN, INPUT);
 
   dispMutex = xSemaphoreCreateMutex();
+  i2cMutex = xSemaphoreCreateMutex();
+  imuMutex = xSemaphoreCreateMutex();
   setupDisplay();                           // vor dem Task-Start: nur dieser Kontext nutzt I2C
+  bool imuOk = setupImu();                  // Kalibrierung: Roboter muss 3 s stillstehen
+  showScreen("robot_base v7.1", imuOk ? "IMU ok" : "IMU FEHLER", "verbinde WLAN", "und Agent ...");
 
   setupTransport();
   delay(2000);
@@ -726,12 +959,12 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
     "cmd_vel"));
 
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(STREAM_PUB_INIT(
     &wheel_cmd_pub, &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
     "wheel_cmd"));
 
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(STREAM_PUB_INIT(
     &range_pub, &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "range"));
@@ -757,6 +990,12 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "bumper"));
 
+  RCCHECK(STREAM_PUB_INIT(
+    &imu_pub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
+    "imu"));
+  setupImuMsg();
+
   // Zeit mit dem Agent abgleichen (für Zeitstempel in /range); Fehler ist nicht kritisch
   rmw_uros_sync_session(1000);
   DBG("Zeitabgleich mit Agent: %s\n", rmw_uros_epoch_synchronized() ? "ok" : "nicht verfuegbar");
@@ -769,7 +1008,8 @@ void setup() {
   RCCHECK(rclc_executor_add_subscription(
     &executor, &state_sub, &state_msg, &state_callback, ON_NEW_DATA));
 
-  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, /robot_state, Publisher /wheel_cmd, /range, /loop_diag, /bumper\n");
+  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, /robot_state, Publisher /wheel_cmd, /range, /loop_diag, /bumper, /imu\n");
+  DBG("Sensorströme: %s\n", STREAM_BEST_EFFORT ? "best effort" : "reliable");
 #if DISPLAY_IN_TASK
   // Display-Task auf Kern 0 (loop() läuft auf Kern 1), Priorität 1, 4 KB Stack
   xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, 1, &displayTaskHandle, 0);
@@ -787,6 +1027,11 @@ void setup() {
 
   // Bumper-Task auf Kern 0, Priorität 2 (über der Display-Task), dann Interrupts aktivieren
   xTaskCreatePinnedToCore(bumperTask, "bumper", 3072, NULL, 2, &bumperTaskHandle, 0);
+  if (imuOk) {
+    // IMU-Task auf Kern 0, Priorität 3 (höchste unserer Tasks: feste Abtastrate)
+    xTaskCreatePinnedToCore(imuTask, "imu", 4096, NULL, 3, &imuTaskHandle, 0);
+    DBG("IMU: Task auf Kern 0, %lu Hz\n", (unsigned long)(1000 / IMU_PERIOD_MS));
+  }
   attachInterrupt(digitalPinToInterrupt(BUMPER_LEFT_PIN), bumperIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(BUMPER_RIGHT_PIN), bumperIsr, CHANGE);
   DBG("Bumper: Task auf Kern 0, Interrupts GPIO %d/%d\n", BUMPER_LEFT_PIN, BUMPER_RIGHT_PIN);
@@ -841,6 +1086,7 @@ void loop() {
   buzzerStep();
   diagStep();
   bumperPublishStep();
+  imuPublishStep();
 
 #if DISPLAY_IN_LOOP
   // Vergleichsvariante: Display blockiert loop() für die Dauer der Übertragung

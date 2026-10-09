@@ -34,7 +34,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
 | 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
-| 11 | Erweiterung: OLED-Display und Bumper mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display und Laufzeitvergleich, v5.1, 11e Bumper (Firmware v6) · ⏳ Grundlast (optional) |
+| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort) |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
 ---
@@ -137,7 +137,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 |---|---|---|
 | I²C-Bus (GPIO 21/22) | antwortende Adressen: **0x3C**, **0x68** | I²C-Scan |
 | OLED-Display | Modul „JMD0.96D-1“, 128×64, Lötbrücke „0x78“ (8 Bit) = **0x3C**; Controller **SSD1306** (Annahme, durch Testbild bestätigt) | Foto, Scan, Stufe 11a |
-| IMU | Modul beschriftet „MPU-92.65“, antwortet auf **0x68**; nicht weiter genutzt | Foto, Scan |
+| IMU | Modul beschriftet „MPU-92.65“, antwortet auf **0x68**, `WHO_AM_I` = **0x70 → MPU-6500** (Stufe 11f) | Foto, Scan, Registerabfrage |
 | APDS-9960 | antwortet nicht (0x39 fehlt), auf dem Foto nicht erkennbar → vermutlich nicht bestückt | Scan |
 | Bumper | siehe eigene Tabelle (Stufe 11e) | `hw_probe` |
 
@@ -946,13 +946,82 @@ Host: obstacle_stop abonniert /bumper → vorwärts gesperrt, /robot_state = 4 (
 
 **Ergebnis ✔:** Bumper als zweiter, taktiler Sensor (ergänzt die gemessene Schwäche des Ultraschalls bei schlecht reflektierenden Hindernissen, 10b). Drei unabhängige Ebenen: Ultraschall → Host, Bumper → Host, Bumper → lokal. 2.6-Kernkonzepte (Task-Verwaltung, Ressourcenschutz, Ereignissteuerung) umgesetzt und gemessen.
 
+### 09.10.2026 – Stufe 11f-a: IMU-Test (Chip, Nullpunkt, Rauschen, Drift)
+
+**Umsetzung:** Testprogramm `firmware/imu_test` ohne micro-ROS und ohne Bibliothek (direkter Registerzugriff, Register der MPU-6500/9250-Familie): wecken, Takt vom Gyroskop, DLPF 3, Gyroskop ±250 °/s (131 LSB/(°/s)), Beschleunigung ±2 g; 100 Hz, Nullpunkt-Kalibrierung 3 s im Stillstand, Integration des Gierwinkels mit der tatsächlichen Zeit.
+
+**⚠ Upload-Abbruch** (`Packet content transfer stopped`): Vermutung „Bumper an GPIO 12“ falsch (Bumper steckte nicht); nach Prüfung mit `fuser /dev/ttyUSB0` und erneutem Upload erfolgreich – vermutlich Port durch einen noch offenen Monitor belegt (nicht gesichert).
+
+| Merkmal | Ergebnis |
+|---|---|
+| Chip | `WHO_AM_I` = **0x70 → MPU-6500** (Modulaufschrift „MPU-92.65“, Anleitung „GY-9250“/„MPU 9265“). MPU-9250 = MPU-6500 + Magnetometer → hier vermutlich **ohne Magnetometer** (aus der Kennung geschlossen, nicht direkt geprüft) → nur relative Drehwinkel |
+| Nullpunkt gz | −1,43 bis −1,45 °/s, zwischen zwei Starts stabil – ohne Korrektur ≈ 87° Fehler pro Minute |
+| Rauschen (5 s, korrigiert) | Std 0,084–0,107 °/s; Rest-Mittel −0,004 °/s |
+| Drift nach Kalibrierung | 0,27° in ≈ 30 s; −0,36° nach ≈ 80 s (passt zu −0,0043 °/s Restfehler) → ≈ 0,26–0,35°/min |
+| Beschleunigung in Ruhe | x −0,07 g, y −0,15 g, **z +1,01 g** → Z-Achse senkrecht (richtige Achse für Drehungen am Boden) |
+| 90° gegen Uhrzeigersinn von Hand | **+89,96…+90,00°**; zurück auf **+0,76°** (Ausrichtung von Hand ≈ ±1°) |
+| Vorzeichen | gegen Uhrzeigersinn positiv = ROS-Konvention (REP 103) = Wirkung von `angular.z > 0` (T4) |
+
+### 09.10.2026 – Stufe 11f-b: Firmware v7/v7.1 – IMU-Task, geteilter I²C-Bus, best effort
+
+**Aufbau v7:**
+- `imuTask` (Kern 0, **Priorität 3** = höchste der eigenen Tasks): `vTaskDelayUntil` alle 10 ms (feste Rate ohne Drift), Nullpunktkorrektur, Integration des Gierwinkels auf dem ESP32 mit der tatsächlichen Zeit (`micros()`) → unabhängig von WLAN-Verzögerungen.
+- **I²C-Mutex:** Display und IMU teilen den Bus. Das Display überträgt **seitenweise** (8 × 128 Byte) und gibt den Bus zwischen den Seiten frei → die IMU wartet höchstens eine Seite statt 32 ms.
+- `/imu` (`sensor_msgs/Imu`, `imu_link`, 20 Hz): Gier als Quaternion, Drehraten [rad/s], Beschleunigung [m/s²], Zeitstempel der Messung; Roll/Nick nicht geschätzt (Kovarianz 1e6). Display Zeile 5: `Gier … L…ms`.
+- Kalibrierung beim Einschalten: Roboter 3 s stillhalten (Anzeige auf dem Display).
+
+**Tests v7 (I1–I4) ✔:** Startmeldungen und Kalibrierung, `/imu` ≈ 20 Hz, 90° von Hand → Display ≈ +90°, Abtastabstand und Lesefehler laut Nutzer unauffällig (Zahlenwerte nicht notiert).
+
+**I5 – Laufzeit mit `/imu` (60 s, ohne Host-Nodes):** typischer Wert unverändert, aber lange Ausreißer deutlich häufiger (`loop()` 90 %: 65,9 → 104,9 ms; Regelabstand 90 %: 78 → 134 ms) → Hypothese aus 11d: reliable-Publisher warten über WLAN auf Bestätigung; `/imu` ist die größte (≈ 330 Byte) und häufigste Nachricht.
+
+**v7.1 – Versuch best effort:** Schalter `STREAM_BEST_EFFORT`: `/range`, `/wheel_cmd`, `/imu` als best effort (`rclc_publisher_init_best_effort`); `/bumper`, `/loop_diag` bleiben reliable. Host: `obstacle_stop` und `distance_warner` abonnieren `/range` mit `qos_profile_sensor_data` – ein reliable-Subscriber verbindet sich **nicht** mit einem best-effort-Publisher (keine Daten, keine Fehlermeldung); best effort auf der Host-Seite passt zu beiden Varianten.
+
+| Kennwert (je 60 s) | v7 reliable (I5) | v7.1 reliable (Gegenprobe) | **v7.1 best effort** |
+|---|---|---|---|
+| `loop()` max/s, Median | 30,7 ms | 39,9 ms | **21,5 ms** |
+| `loop()` max/s, 90 % | 104,9 ms | 88,7 ms | **23,9 ms** |
+| `loop()` max/s, Höchstwert | 165,7 ms | 146,8 ms | **65,9 ms** |
+| Regelabstand max/s, 90 % | 134,0 ms | 103,1 ms | **65,0 ms** |
+| Regelabstand max/s, Höchstwert | 173,0 ms | 177,1 ms | **101,0 ms** |
+
+**Ergebnis:** Lange Blockaden treten mit reliable in beiden Messungen auf, mit best effort kaum → Ursache der Grundlast aus 11d weitgehend geklärt; für Sensorströme ist best effort die passende Wahl. Host-Test mit best effort ✔ (`obstacle_stop` empfängt `/range`, Bumper-Meldungen kommen an).
+**Verbleibend:** Regelabstand im Median ≈ 59 ms statt 50 ms – Hypothese: Regelschritt wird nur einmal je `loop()`-Durchlauf geprüft (Durchlauf bis ≈ 21 ms, davon bis 10 ms Wartezeit in `spin_some`) → bauartbedingte Verspätung um bis zu einen Durchlauf (nicht geprüft).
+
+### 09.10.2026 – Stufe 11f-c: Drehung mit IMU-Rückführung
+
+**Umsetzung:** `shape_driver_node` um Parameter erweitert (Standard unverändert zeitgesteuert): `turn_mode` (`time`/`imu`), `imu_topic`, `turn_lead_deg` (Vorhalt), `settle_time` (0,5 s), `imu_timeout`. Im IMU-Modus: warten auf `/imu`, Drehen bis Gier-Änderung ≥ 90° − Vorhalt, Gierwinkel über ±180° hinweg „ausgerollt“ (Summe der Differenzen); je Ecke Ausgabe Winkel beim Stoppbefehl und nach 0,5 s, am Ende Zusammenfassung. Sicherheit: ohne `/imu` Abbruch; Drehung länger als doppelte Solldauer → Abbruch. Parameterdatei `config/robot_imu.yaml`.
+
+**Test aufgebockt ✔:** Räder drehen, Roboter nicht → IMU misst keine Drehung → Abbruch nach 8,55 s (= 2 × 4,25 s), keine Endlosdrehung.
+
+**Fahrten auf dem Boden (Viereck 4 × 0,30 m, 31,3 mm/s, 0,369 rad/s):**
+
+| Fahrt | Weg | Vorhalt | Fehler je Ecke (IMU, nach Auslaufen) | Summe | Beobachtung am Boden |
+|---|---|---|---|---|---|
+| A | über `obstacle_stop` | 0° | +2,22 / +5,34 / +4,85 / +3,49° | +15,9° | ≈ 12° zu viel |
+| A2 Lauf 1 | über `obstacle_stop` | 4° | −0,99 / −0,48 / +0,59 / −1,85° | −2,7° | Winkel sehr gut |
+| A2 Lauf 2 | über `obstacle_stop` | 4° | −2,11 / −0,34 / +1,16 / −0,19° | −1,5° | – |
+| **A2 Lauf 3** | **direkt `/cmd_vel`** | 4° | **+0,51 / +0,57 / −0,49 / +0,67°** | **+1,3°** | minimal zu viel, kaum erkennbar; Endpunkt = Start; alle 4 Seiten |
+| **B2** | **direkt `/cmd_vel`** | – (Zeit) | – | – | Winkel und Position: minimale, vernachlässigbare Abweichung; alle 4 Seiten |
+
+- Fehleranteile (Fahrt A): Schwelle beim Stopp im Mittel bereits +0,77° überschritten (IMU-Werte mit 20 Hz → ≈ 1,06° Drehung zwischen zwei Werten) + Nachdrehen +3,2° (Verzögerung Host → WLAN → Regelschritt) = +3,98° → **Vorhalt 4°**.
+- IMU-Summe (+15,9°) und Beobachtung am Boden (≈ 12°, Schätzung mit dem Auge) stimmen grob überein → die IMU erfasst auch das Nachdrehen.
+- Fester Vorhalt gleicht nur den Mittelwert aus; Streuung bleibt (Lauf 1/2: ±1,5–2°). Direkt auf `/cmd_vel` war das Nachdrehen sehr gleichmäßig (3,42–3,81°) gegenüber 1,6–4,6° über `obstacle_stop` – Hinweis (n = 4 je Fahrt), dass die zusätzliche Weiterleitung schwankende Verzögerung beiträgt; nicht nachgewiesen.
+
+**⚠ Scheinhindernisse:** In allen Fahrten über `obstacle_stop` (A, A2, B, B2) sperrte `HINDERNIS` (0,16–0,18 m) die Vorwärtsfahrt **fast über die ganze Seite 2 und 4**, obwohl die Fläche laut Nutzer frei war. Der Roboter fuhr dann nur Seite 1 und 3 (hin und zurück) und endete trotzdem nahe am Start → frühere Positionswerte (2–4 cm) **ungültig**, Winkelwerte gültig (Drehen ist bei Sperre erlaubt). Vermutung lose Bumper-Kabel im Schallkegel: Kabel befestigt, Sperren blieben → nicht (allein) die Ursache. Ursache offen. Nebenbefund B2 (…1075): `/range` und `/bumper` gleichzeitig ausgeblieben → vermutlich kurze WLAN-Unterbrechung, Filter sperrte korrekt (fail-safe).
+
+**Bewertung:** Mit 4° Vorhalt liegt jede Ecke innerhalb ±2,1° (über `obstacle_stop`) bzw. ±0,7° (direkt). Unter gleichen Bedingungen (gleicher Boden, Akku) sind Zeitsteuerung (kalibriert in 9b) und IMU-Regelung gleichwertig; der erwartete Vorteil der Rückführung bei veränderten Bedingungen (Untergrund, Akkuspannung, Schlupf) ist **Hypothese, nicht nachgewiesen**. Die erreichbare Genauigkeit wird durch das Zeitverhalten der Übertragung begrenzt (Vorhalt nötig, Streuung), nicht durch den Sensor.
+
 ---
 
 ## Offene Punkte
 
 **Technisch**
 - [x] Firmware v5.1: Fehleranzeige, Buzzer-Pin, Startbild Modus 0 (09.10.2026)
-- [ ] Grundlast der Schleife (≈ 36 ms Median, bis 120 ms ohne Display) untersuchen: zuerst best-effort-Publisher für `/range`, `/wheel_cmd`, dann ggf. serieller Transport zum Vergleich – je nur eine Änderung
+- [x] Grundlast der Schleife: Ursache reliable-Publisher über WLAN, mit best effort weitgehend behoben (11f-b)
+- [ ] Scheinhindernisse 0,16–0,18 m bei Fahrten über `obstacle_stop` (Seiten 2 und 4) klären: `/range` beobachten, während der Roboter gesperrt steht; Umgebung/Boden/Schallkegel prüfen
+- [ ] IMU gegen Zeit bei veränderten Bedingungen (anderer Untergrund, schwächerer Akku) – Nutzen der Rückführung nachweisen (optional)
+- [ ] Regelschritt in eigene periodische Task (`vTaskDelayUntil`) statt Prüfung in `loop()` – Verspätung um bis zu einen Durchlauf beseitigen (optional; micro-ROS-Aufrufe bleiben in `loop()`)
+- [ ] IMU: Zahlenwerte größter Abtastabstand (I4) nachtragen; Magnetometer direkt prüfen (Bypass + Scan 0x0C) – optional
 - [x] Bumper: Zuordnung und Schaltlogik ermittelt, Firmware v6 + Host-Auswertung, Tests T1–T5 (09.10.2026)
 - [ ] Bumper: Pinbelegung der Leisten (welcher Pin VCC/GND/Signal) mit Multimeter bestätigen – optional, Steckrichtung laut Anleitung bekannt
 - [ ] Bumper: Fahrt auf dem Boden gegen ein schlecht reflektierendes Hindernis (Ultraschall erkennt es nicht, Bumper stoppt) – optional, gute Demonstration

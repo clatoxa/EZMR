@@ -32,6 +32,7 @@ from collections import deque
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Range
 from std_msgs.msg import UInt8
@@ -77,7 +78,8 @@ class ObstacleStop(Node):
 
         self.pub = self.create_publisher(Twist, out_topic, 10)
         self.create_subscription(Twist, in_topic, self.on_cmd, 10)
-        self.create_subscription(Range, range_topic, self.on_range, 10)
+        self.create_subscription(Range, range_topic, self.on_range,
+                                 qos_profile_sensor_data)   # passt zu best effort (v7.1) und reliable
         self.state_pub = self.create_publisher(UInt8, self.get_parameter('state_topic').value, 10)
         self.use_bumper = bool(self.get_parameter('use_bumper').value)
         self.bumper_timeout = float(self.get_parameter('bumper_timeout').value)

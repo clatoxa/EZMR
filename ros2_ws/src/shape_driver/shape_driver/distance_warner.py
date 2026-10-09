@@ -18,6 +18,7 @@ from collections import deque
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Range
 from std_msgs.msg import UInt16
 
@@ -52,7 +53,8 @@ class DistanceWarner(Node):
         self.last_period = None
 
         self.pub = self.create_publisher(UInt16, self.get_parameter('buzzer_topic').value, 10)
-        self.create_subscription(Range, self.get_parameter('range_topic').value, self.on_range, 10)
+        self.create_subscription(Range, self.get_parameter('range_topic').value, self.on_range,
+                                 qos_profile_sensor_data)   # passt zu best effort (v7.1) und reliable
         # Überwachung: bleiben Messwerte aus, Buzzer ausschalten
         self.create_timer(0.2, self.on_watchdog)
 
