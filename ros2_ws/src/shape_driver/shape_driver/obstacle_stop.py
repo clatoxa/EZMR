@@ -20,7 +20,11 @@ Stufe 11: veröffentlicht zusätzlich den Zustand auf /robot_state (std_msgs/UIn
 1 = FREI, 2 = HINDERNIS (vorwärts gesperrt), 3 = keine aktuellen Sensordaten (vorwärts gesperrt).
 Senden bei Zustandswechsel sofort und sonst alle 0,2 s.
 
-Stand 08.10.2026: Grundfunktion getestet (Stufe 10b); /robot_state UNGETESTET.
+Stufe 11/12 (v6): wertet zusätzlich /bumper (std_msgs/UInt8, Bit 0 links, Bit 1 rechts) aus.
+Bumper gedrückt -> vorwärts gesperrt, /robot_state = 4 (BUMPER). Freigabe, sobald kein Bumper mehr gedrückt ist.
+Fail-safe: mit use_bumper = true sperren auch fehlende /bumper-Daten (> bumper_timeout).
+
+Stand 09.10.2026: Grundfunktion getestet (10b), /robot_state getestet (11c); Bumper-Auswertung UNGETESTET.
 """
 import math
 import statistics
@@ -35,6 +39,7 @@ from std_msgs.msg import UInt8
 STATE_FREE = 1
 STATE_OBSTACLE = 2
 STATE_NO_DATA = 3
+STATE_BUMPER = 4
 
 
 class ObstacleStop(Node):
@@ -50,6 +55,9 @@ class ObstacleStop(Node):
         self.declare_parameter('range_timeout', 0.5)      # s: ohne Messwert -> sperren
         self.declare_parameter('median_window', 3)        # Anzahl Werte im Medianfilter
         self.declare_parameter('state_topic', '/robot_state')
+        self.declare_parameter('bumper_topic', '/bumper')
+        self.declare_parameter('use_bumper', True)
+        self.declare_parameter('bumper_timeout', 1.0)   # s
 
         in_topic = self.get_parameter('input_topic').value
         out_topic = self.get_parameter('output_topic').value
@@ -71,13 +79,20 @@ class ObstacleStop(Node):
         self.create_subscription(Twist, in_topic, self.on_cmd, 10)
         self.create_subscription(Range, range_topic, self.on_range, 10)
         self.state_pub = self.create_publisher(UInt8, self.get_parameter('state_topic').value, 10)
+        self.use_bumper = bool(self.get_parameter('use_bumper').value)
+        self.bumper_timeout = float(self.get_parameter('bumper_timeout').value)
+        self.bumper = 0
+        self.last_bumper_time = None
+        if self.use_bumper:
+            self.create_subscription(UInt8, self.get_parameter('bumper_topic').value, self.on_bumper, 10)
         self.last_state = None
         self.create_timer(0.2, self.publish_state)
 
         self.get_logger().info(
             f'{in_topic} -> {out_topic}, Sensor {range_topic}, '
             f'Stopp < {self.stop_distance:.2f} m, Freigabe > {self.release_distance:.2f} m, '
-            f'Timeout {self.range_timeout:.2f} s, Median über {window}')
+            f'Timeout {self.range_timeout:.2f} s, Median über {window}, '
+            f'Bumper {"an" if self.use_bumper else "aus"}')
 
     def on_range(self, msg):
         r = msg.range
@@ -97,9 +112,31 @@ class ObstacleStop(Node):
         if self.current_state() != self.last_state:
             self.publish_state()                 # Zustandswechsel sofort melden (Display-Ereignis)
 
+    def on_bumper(self, msg):
+        if msg.data != self.bumper:
+            if msg.data:
+                seite = {1: 'LINKS', 2: 'RECHTS', 3: 'BEIDE'}.get(msg.data, str(msg.data))
+                self.get_logger().warn(f'BUMPER {seite} -> vorwärts gesperrt')
+            else:
+                self.get_logger().info('Bumper frei')
+        self.bumper = msg.data
+        self.last_bumper_time = self.get_clock().now()
+        if self.current_state() != self.last_state:
+            self.publish_state()
+
+    def bumper_is_stale(self):
+        if not self.use_bumper:
+            return False
+        if self.last_bumper_time is None:
+            return True
+        age = (self.get_clock().now() - self.last_bumper_time).nanoseconds / 1e9
+        return age > self.bumper_timeout
+
     def current_state(self):
-        if self.range_is_stale():
+        if self.range_is_stale() or self.bumper_is_stale():
             return STATE_NO_DATA
+        if self.use_bumper and self.bumper != 0:
+            return STATE_BUMPER
         return STATE_OBSTACLE if self.blocked else STATE_FREE
 
     def publish_state(self):
@@ -127,7 +164,12 @@ class ObstacleStop(Node):
         if stale:
             self.get_logger().warn('Keine aktuellen /range-Werte -> vorwärts gesperrt',
                                    throttle_duration_sec=2.0)
-        if (self.blocked or stale) and out.linear.x > 0.0:
+        bumper_stale = self.bumper_is_stale()
+        if bumper_stale:
+            self.get_logger().warn('Keine aktuellen /bumper-Werte -> vorwärts gesperrt',
+                                   throttle_duration_sec=2.0)
+        bumper_pressed = self.use_bumper and self.bumper != 0
+        if (self.blocked or stale or bumper_stale or bumper_pressed) and out.linear.x > 0.0:
             out.linear.x = 0.0
         self.pub.publish(out)
 

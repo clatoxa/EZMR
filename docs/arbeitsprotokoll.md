@@ -17,7 +17,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 2.3 | ESP32-Roboter über micro-ROS | ✔ Kernaufgabe erfüllt: `shape_driver` fährt das Viereck auf dem realen Roboter (micro-ROS über WLAN, Akku) |
 | 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ✔ Ultraschall-Hinderniserkennung mit Sicherheitsfilter, Reaktionszeitmessung und akustischer Abstandswarnung (Stufe 10a–d) · Anforderungen von 2.4 erfüllt (Abgleich 08.10.2026) · Erweiterung Display (Stufe 11) |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
-| 2.6 | FreeRTOS (optional) | ⏳ teilweise: Display-Task auf Kern 0, Mutex, Task-Notification, Laufzeitmessung (Stufe 11); Interrupt/Semaphore mit Bumper offen |
+| 2.6 | FreeRTOS (optional) | ✔ Kernkonzepte umgesetzt (Stufe 11): Tasks auf Kern 0 (Display, Bumper), Mutex (Anzeigedaten, Motor-UART, Serial), Task-Notification, Interrupt → binäre Semaphore → Task; Laufzeit- und Reaktionszeitmessung |
 | OTA | OTA-Updates (optional) | nicht ausgewählt |
 
 ### Stufenplan
@@ -34,7 +34,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
 | 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
-| 11 | Erweiterung: OLED-Display mit FreeRTOS-Task (2.6), Bumper | 2.4 / 2.6 | ✔ 11a–d Display und Laufzeitvergleich · ⏳ v5.1, Grundlast, Bumper |
+| 11 | Erweiterung: OLED-Display und Bumper mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display und Laufzeitvergleich, v5.1, 11e Bumper (Firmware v6) · ⏳ Grundlast (optional) |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
 ---
@@ -120,6 +120,17 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | Ansteuerung | Arduino `tone()` / `noTone()` (LEDC), 2000 Hz | Firmware v4; Frequenz angenommen, nicht optimiert |
 | Versorgung | funktioniert auch über USB allein | Versuch 10d |
 
+### Bumper (Stufe 11e, ermittelt 09.10.2026 mit `hw_probe`)
+
+| Merkmal | Wert | Grundlage |
+|---|---|---|
+| Anschluss | links (von hinten gesehen): **JP4 → GPIO 12**, rechts: **JP3 → GPIO 14** | `hw_probe`: Einstecken und Drücken |
+| Steckrichtung | von hinten über die Platine gesehen: links rot, Mitte schwarz, rechts grün (beide Leisten) | Anleitung, Abbildung 2 (vom Nutzer abgelesen) |
+| Schaltlogik | nicht gedrückt = **HIGH**, gedrückt = **LOW**, abgezogen = **LOW** | `hw_probe` |
+| Deutung | Öffner legt Signal in Ruhe an VCC, Platine zieht ohne Kontakt auf GND (Pull-down stärker als interner Pull-up) → abgezogen/Kabelbruch wirkt wie gedrückt (fail-safe) | Messung; Beschaltung selbst nicht geprüft |
+| Prellen | beim Einstecken 9 Wechsel in 1,4 s; beim Loslassen HIGH → LOW (55 ms) → HIGH in 66 ms; Auflösung von `hw_probe` ≈ 10 ms | `hw_probe` |
+| GPIO 12 | Strapping-Pin: eingesteckter linker Bumper (HIGH) beim Start → `flash read err, 1000`, Neustartschleife (`RTCWDT_RTC_RESET`) | Anleitung 4.2.3; am 09.10.2026 beobachtet |
+
 ### Weitere Komponenten (Erkundung 08.10.2026, Testprogramm `firmware/hw_probe`)
 
 | Komponente | Befund | Grundlage |
@@ -128,7 +139,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | OLED-Display | Modul „JMD0.96D-1“, 128×64, Lötbrücke „0x78“ (8 Bit) = **0x3C**; Controller **SSD1306** (Annahme, durch Testbild bestätigt) | Foto, Scan, Stufe 11a |
 | IMU | Modul beschriftet „MPU-92.65“, antwortet auf **0x68**; nicht weiter genutzt | Foto, Scan |
 | APDS-9960 | antwortet nicht (0x39 fehlt), auf dem Foto nicht erkennbar → vermutlich nicht bestückt | Scan |
-| Bumper | Steckerleisten **JP3/JP4** (dreipolig, ohne Pinbeschriftung) vermutlich zugehörig; Kabel rot/schwarz/grün (Belegung unbekannt). Ohne Bumper lesen GPIO 12 und 14 auch mit internem Pull-up LOW → vermutlich externer Pull-down auf der Platine (Hypothese). Nicht eingesteckt, Pinbelegung erst mit Multimeter klären (Kurzschlussgefahr bei Verpolung). | `hw_probe`, Foto |
+| Bumper | siehe eigene Tabelle (Stufe 11e) | `hw_probe` |
 
 ---
 
@@ -882,14 +893,70 @@ Vorab-Messreihe Modus 1 (21 s, mit laufendem `obstacle_stop`): `loop()` Median �
 - **Grundlast ohne Display:** längster Durchlauf im Median ≈ 36 ms, bis 120 ms; Regelabstand fast jede Sekunde > 55 ms. Ursache offen (Hypothese: reliable-Publisher warten auf Bestätigung über WLAN, `spin_some`). War in Stufe 9/10 nicht gemessen; 10c (E3→E4 ≤ 52 ms) spricht eher gegen so lange Blockaden, ist aber kein Nachweis.
 - Kleinste Regelabstände (15–42 ms) entstehen durch das Aufholen nach Verspätungen (`lastControlMs += 50`).
 
+### 09.10.2026 – Firmware v5.1: Fehleranzeige und Korrekturen
+
+**Änderungen:** Fehleranzeige auf dem Display, wenn micro-ROS beim Start scheitert (`FEHLER / micro-ROS Zeile N / Agent erreichbar? / Agent starten, EN`) – zulässig, weil alle Prüfungen vor dem Start der Display-Task liegen (nur ein Kontext nutzt I²C); Buzzer-Pin beim Start als Ausgang LOW statt `noTone()`; Startbild „verbinde WLAN und Agent ...“; Messmodus 0 eindeutig beschriftet.
+**Tests ✔:** Keine `ledc`-Meldung mehr beim Start; Agent beendet + EN → Display zeigt `FEHLER …`; Agent gestartet + EN → Statusanzeige.
+
+### 09.10.2026 – Stufe 11e: Bumper mit Interrupt, Semaphore und Task (Firmware v6)
+
+**Vorarbeit:** Belegung und Schaltlogik mit `hw_probe` ermittelt (siehe Hardwaretabelle Bumper). Steckrichtung nach Abbildung 2 der Anleitung. Beschluss: Auswertung auf dem Host wie gefordert **und** zusätzlich lokale Schutzfunktion auf dem ESP32 (wirkt auch bei WLAN-Ausfall).
+
+**Aufbau:**
+
+```
+Bumper-Flanke ─► bumperIsr (IRAM): Zeit merken, xSemaphoreGiveFromISR
+                    └─► bumperTask (Kern 0, Prio 2) wartet auf binäre Semaphore (sonst Kontrolle alle 200 ms / 20 ms)
+                          ├─ Entprellung asymmetrisch: LOW sofort = gedrückt, HIGH erst nach 100 ms stabil = frei
+                          ├─ neuer Druck bei Vorwärtsfahrt → sofort Stopp an beide Motoren (UART-Mutex)
+                          ├─ Zustand in Anzeigedaten (Mutex) + Display-Task wecken (Notification)
+                          └─ bumperState (8 Bit) ─► loop(): /bumper (std_msgs/UInt8, Bit 0 links, Bit 1 rechts),
+                                                    bei Änderung und alle 200 ms; controlStep: keine Vorwärtsfahrt
+Host: obstacle_stop abonniert /bumper → vorwärts gesperrt, /robot_state = 4 (BUMPER);
+      keine /bumper-Daten > 1 s → ebenfalls gesperrt (fail-safe, abschaltbar mit use_bumper:=false)
+```
+
+| 2.6-Konzept | Umsetzung |
+|---|---|
+| Interrupt + Semaphore | ISR gibt nur die binäre Semaphore frei; die Task wartet blockiert ohne CPU-Last (Anleitung 2.6 Punkt 3) |
+| Ressourcenschutz | **UART-Mutex**: `loop()` und `bumperTask` senden an die Motoren, Pakete dürfen sich nicht vermischen; **Serial-Mutex** in `DBG()` für Ausgaben aus mehreren Tasks (2.6 Punkt 2); Anzeigedaten wie in v5 |
+| Prioritäten | Bumper-Task Prio 2 > Display-Task Prio 1 (beide Kern 0) |
+
+**Begründung asymmetrische Entprellung:** Beim Loslassen wurde ein 55 ms langes LOW gemessen; eine symmetrische Entprellung mit 50 ms hätte es als neuen Druck gewertet. Druck sofort, Freigabe verzögert = gleiches Prinzip wie die Hysterese in `obstacle_stop`.
+
+**⚠ Fehler und Lösungen:**
+- T3 zunächst ohne „Stopp“-Meldung: Hand beim Drücken der Bumper im Schallkegel → `obstacle_stop` sperrte bereits wegen Ultraschall, am ESP32 kam `linear.x = 0` an, Firmware sah keine Vorwärtsfahrt (Software verhielt sich richtig, Versuchsaufbau ungeeignet) → Messung ohne `obstacle_stop`, direkt auf `/cmd_vel`.
+- Neustartschleife `flash read err, 1000` / `RTCWDT_RTC_RESET`: ESP32 startete neu, während der linke Bumper (GPIO 12) steckte – genau das in der Anleitung beschriebene Verhalten. Auslöser des Neustarts nicht festgehalten. Lösung: JP4 abziehen, EN, nach dem Start wieder einstecken. **Regel:** linken Bumper vor jedem Einschalten, EN, Upload und Wechsel USB ↔ Akku abziehen.
+
+**Tests:**
+
+| Test | Aufbau | Ergebnis |
+|---|---|---|
+| T1 Erfassung | USB, `ros2 topic echo /bumper` | ✔ 0/1/2/3 korrekt, Display `BUMPER LINKS!/RECHTS!/BEIDE!` (Zeile 4, invertiert), je Loslassen genau ein Wechsel auf 0 (Entprellung wirksam) |
+| T2 Host | `obstacle_stop` | ✔ `BUMPER LINKS/RECHTS/BEIDE -> vorwärts gesperrt`, `Bumper frei`, Display `Host: BUMPER`; unabhängig von der Ultraschallsperre |
+| T3 Sofort-Stopp | USB, ohne `obstacle_stop`, `/cmd_vel` x = 0,03 | ✔ Stopp bei jedem neuen Druck, Zeit Flanke → Ende der UART-Übertragung siehe unten |
+| T4 Motoren | aufgebockt, Akku, ohne Host-Node | ✔ Räder stoppen sofort beim Drücken, laufen nach Loslassen wieder an; Drehung (`angular.z` 0,3: rechts vor, links zurück) trotz gedrücktem Bumper erlaubt |
+| T5 ohne Host | wie T3/T4 ohne `obstacle_stop` | ✔ lokale Schutzfunktion wirkt ohne Host-Auswertung |
+
+**Reaktionszeit lokal (T3, n = 10):** min 12,74 ms · Median 13,06 ms · Mittel 13,66 ms · max 16,06 ms.
+- Rechnerisch: 2 Pakete × 6 Byte × 10 Bit / 9600 Baud ≈ 12,5 ms (`Serial2.flush()` wartet auf das Senden) → ISR, Semaphore und Aufwecken der Task zusammen nur ≈ 0,2–0,3 ms.
+- Ausreißer bis +3 ms: Hypothese Warten auf den UART-Mutex (paralleles Paket aus `loop()`, bis 6,25 ms möglich) oder Verdrängung durch WLAN-Aufgaben auf Kern 0 – nicht geprüft.
+- Gemessen bis Ende der UART-Übertragung, nicht bis zum Stillstand (ATtiny/Mechanik nicht erfasst); linkes Rad erhält den Befehl nach ≈ 6,5 ms, rechtes nach ≈ 13 ms.
+- Vergleich: über den Regelschritt bis 50 ms (unter Last > 100 ms, 11d), über den Host (Ultraschall, 10c) ≈ 160 ms → lokale Reaktion etwa zehnmal schneller.
+
+**Ergebnis ✔:** Bumper als zweiter, taktiler Sensor (ergänzt die gemessene Schwäche des Ultraschalls bei schlecht reflektierenden Hindernissen, 10b). Drei unabhängige Ebenen: Ultraschall → Host, Bumper → Host, Bumper → lokal. 2.6-Kernkonzepte (Task-Verwaltung, Ressourcenschutz, Ereignissteuerung) umgesetzt und gemessen.
+
 ---
 
 ## Offene Punkte
 
 **Technisch**
-- [ ] Firmware v5.1: Fehleranzeige auf dem Display bei fehlendem Agent; Buzzer-Pin beim Start als Ausgang LOW statt `noTone()`; Startbild in Modus 0 eindeutig beschriften
+- [x] Firmware v5.1: Fehleranzeige, Buzzer-Pin, Startbild Modus 0 (09.10.2026)
 - [ ] Grundlast der Schleife (≈ 36 ms Median, bis 120 ms ohne Display) untersuchen: zuerst best-effort-Publisher für `/range`, `/wheel_cmd`, dann ggf. serieller Transport zum Vergleich – je nur eine Änderung
-- [ ] Bumper: Pinbelegung JP3/JP4 mit Multimeter klären (VCC/GND/Signal, Zuordnung GPIO 12/14), dann Erfassung auf dem ESP32 + Auswertung in `obstacle_stop`; 2.6 Punkt 3: Interrupt → Semaphore → Alarm-Task
+- [x] Bumper: Zuordnung und Schaltlogik ermittelt, Firmware v6 + Host-Auswertung, Tests T1–T5 (09.10.2026)
+- [ ] Bumper: Pinbelegung der Leisten (welcher Pin VCC/GND/Signal) mit Multimeter bestätigen – optional, Steckrichtung laut Anleitung bekannt
+- [ ] Bumper: Fahrt auf dem Boden gegen ein schlecht reflektierendes Hindernis (Ultraschall erkennt es nicht, Bumper stoppt) – optional, gute Demonstration
+- [ ] Reaktionszeit Bumper: Ursache der Ausreißer (Mutex-Wartezeit vs. WLAN) klären – optional
 - [ ] U8g2-Version notieren (`pio pkg list`)
 - [ ] Buzzer: Dauerton-Stufe (< 0,10 m) über `distance_warner` nachweisen
 - [x] Buzzer: Ursache der LEDC-Meldung geklärt (`noTone()` ohne vorherigen Ton in `setup()`), Korrektur in v5.1

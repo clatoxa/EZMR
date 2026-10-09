@@ -24,6 +24,17 @@
 //     x = längster loop()-Durchlauf [us], y = größter / z = kleinster Abstand zwischen Regelschritten [us].
 //   DISPLAY_MODE (Vergleich Stufe 11d): 0 = Display nach dem Startbild nicht aktualisiert (Grundlinie),
 //                                       1 = eigene FreeRTOS-Task (Standard), 2 = direkt in loop().
+// v5.1: Fehleranzeige auf dem Display (Agent nicht erreichbar), Buzzer-Pin beim Start als Ausgang LOW
+//       (statt noTone() -> keine LEDC-Fehlermeldung mehr), eindeutige Anzeige im Messmodus 0.
+// v6 (Anleitung 2.6 Punkt 3): Bumper links GPIO 12 (JP4), rechts GPIO 14 (JP3), ermittelt mit hw_probe.
+//   Öffner nach VCC, Platine zieht auf GND: nicht gedrückt = HIGH, gedrückt = LOW, abgezogen = LOW (fail-safe).
+//   ACHTUNG GPIO 12 ist Strapping-Pin: linker Bumper beim Start/Reset/Upload ABGEZOGEN (Anleitung 4.2.3).
+//   Interrupt (CHANGE) -> ISR gibt binäre Semaphore frei -> bumperTask (Kern 0, Prio 2) wacht auf,
+//   entprellt asymmetrisch (LOW sofort = gedrückt, HIGH erst nach BUMPER_RELEASE_MS stabil = frei),
+//   stoppt bei Vorwärtsfahrt sofort lokal (Motor-UART durch Mutex geschützt) und meldet den Zustand.
+//   loop() veröffentlicht /bumper (std_msgs/UInt8, Bit 0 links, Bit 1 rechts) bei Änderung und alle 200 ms;
+//   Auswertung auf dem Host (obstacle_stop). Lokal zusätzlich: keine Vorwärtsfahrt bei gedrücktem Bumper.
+//   Serielle Ausgaben aus mehreren Tasks durch Mutex geschützt (2.6 Punkt 2).
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -51,8 +62,14 @@
 #error Nur die Transporte serial und wifi werden unterstuetzt.
 #endif
 
+SemaphoreHandle_t serialMutex = NULL;   // schützt Serial bei Ausgaben aus mehreren Tasks (v6)
+
 #if DEBUG_ENABLED
-#define DBG(...) Serial.printf(__VA_ARGS__)
+#define DBG(...) do { \
+    if (serialMutex) xSemaphoreTake(serialMutex, portMAX_DELAY); \
+    Serial.printf(__VA_ARGS__); \
+    if (serialMutex) xSemaphoreGive(serialMutex); \
+  } while (0)
 #else
 #define DBG(...) do {} while (0)
 #endif
@@ -112,6 +129,12 @@ static const uint32_t DISPLAY_PERIOD_MS     = 250;    // Aktualisierung ohne Ere
 static const uint32_t ROBOT_STATE_TIMEOUT_MS = 1500;  // ohne /robot_state -> "Host: --"
 static const uint32_t DIAG_PERIOD_MS        = 1000;
 
+// ---------- Bumper (v6) ----------
+static const int      BUMPER_LEFT_PIN       = 12;     // JP4, Strapping-Pin!
+static const int      BUMPER_RIGHT_PIN      = 14;     // JP3
+static const uint32_t BUMPER_RELEASE_MS     = 100;    // HIGH muss so lange stabil sein (Prellen gemessen: 55 ms LOW)
+static const uint32_t BUMPER_PUB_PERIOD_MS  = 200;
+
 struct WheelCmd {
   uint8_t dir;
   uint16_t param;   // 0 = Stopp
@@ -130,6 +153,8 @@ std_msgs__msg__UInt16 buzzer_msg;
 rcl_subscription_t state_sub;
 std_msgs__msg__UInt8 state_msg;
 rcl_publisher_t diag_pub;
+rcl_publisher_t bumper_pub;
+std_msgs__msg__UInt8 bumper_msg;
 geometry_msgs__msg__Vector3 diag_msg;
 rclc_executor_t executor;
 rclc_support_t support;
@@ -137,7 +162,7 @@ rcl_allocator_t allocator;
 rcl_node_t node;
 
 // ---------- Zustand ----------
-float cmdV = 0.0f;              // m/s
+volatile float cmdV = 0.0f;     // m/s; volatile: wird auch von bumperTask gelesen
 float cmdW = 0.0f;              // rad/s
 uint32_t lastCmdMs = 0;
 bool cmdReceived = false;
@@ -176,10 +201,11 @@ struct DisplayData {
   int16_t  wheelLeft;       // vorzeichenbehafteter param
   int16_t  wheelRight;
   bool     cmdTimedOut;
+  uint8_t  bumper;          // Bit 0 links, Bit 1 rechts (gedrückt)
   uint32_t loopMaxUs;       // aus der letzten Diagnoseperiode
   uint32_t ctrlMaxUs;
 };
-DisplayData dispData = {NAN, 0, 0, 0, 0, 0, true, 0, 0};
+DisplayData dispData = {NAN, 0, 0, 0, 0, 0, true, 0, 0, 0};
 SemaphoreHandle_t dispMutex = NULL;   // schützt dispData
 TaskHandle_t displayTaskHandle = NULL;
 
@@ -191,12 +217,22 @@ uint32_t lastCtrlUs = 0;
 uint32_t lastDiagMs = 0;
 
 // ---------- Motor-UART ----------
+SemaphoreHandle_t uartMutex = NULL;     // Motor-UART: loop() und bumperTask senden (v6)
+
 void sendMotorFrame(uint8_t id, uint8_t mode, uint8_t dir, uint16_t param) {
   uint8_t f[6] = {START_BYTE, id, mode, dir,
                   (uint8_t)(param >> 8), (uint8_t)(param & 0xFF)};  // Big-Endian
+  if (uartMutex) xSemaphoreTake(uartMutex, portMAX_DELAY);   // Paket nie zerstückeln
   Serial2.write(f, sizeof(f));
   Serial2.flush();
+  if (uartMutex) xSemaphoreGive(uartMutex);
 }
+
+// Bumper-Zustand: geschrieben nur von bumperTask, gelesen von loop() (8 Bit -> atomar)
+volatile uint8_t bumperState = 0;
+SemaphoreHandle_t bumperSem = NULL;     // binäre Semaphore: ISR -> bumperTask
+TaskHandle_t bumperTaskHandle = NULL;
+volatile uint32_t bumperIsrUs = 0;      // Zeitpunkt der letzten Flanke (für Reaktionszeit)
 
 void stopMotors() {
   sendMotorFrame(ID_LEFT, MODE_CONT, 0, 0);
@@ -217,10 +253,28 @@ void setBuzzer(bool on) {
   buzzerOn = on;
 }
 
+// Einfache Textanzeige (bis zu 4 Zeilen). Nur aufrufen, solange die Display-Task NICHT läuft
+// (in setup() bzw. error_loop vor dem Task-Start), sonst greifen zwei Kontexte auf I2C zu.
+void showScreen(const char *l1, const char *l2, const char *l3, const char *l4) {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+  if (l1) oled.drawStr(0, 10, l1);
+  if (l2) oled.drawStr(0, 24, l2);
+  if (l3) oled.drawStr(0, 38, l3);
+  if (l4) oled.drawStr(0, 52, l4);
+  oled.sendBuffer();
+}
+
 void error_loop(int line) {
   stopMotors();
   setBuzzer(false);
   DBG("FEHLER: micro-ROS-Aufruf in Zeile %d fehlgeschlagen (Agent erreichbar?). Neustart mit EN.\n", line);
+  // Alle RCCHECK-Aufrufe liegen in setup() vor dem Start der Display-Task -> direkter Zugriff zulässig
+  if (displayTaskHandle == NULL) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "micro-ROS Zeile %d", line);
+    showScreen("FEHLER", buf, "Agent erreichbar?", "Agent starten, EN");
+  }
   while (1) {
     delay(100);
   }
@@ -281,8 +335,12 @@ void controlStep() {
   float vl = 0.0f;
   float vr = 0.0f;
   if (!timedOut && isfinite(cmdV) && isfinite(cmdW)) {
-    vl = cmdV - cmdW * TRACK_WIDTH_M / 2.0f;
-    vr = cmdV + cmdW * TRACK_WIDTH_M / 2.0f;
+    float v = cmdV;
+    if (bumperState != 0 && v > 0.0f) {
+      v = 0.0f;                             // lokale Schutzfunktion: Bumper gedrückt -> nicht vorwärts
+    }
+    vl = v - cmdW * TRACK_WIDTH_M / 2.0f;
+    vr = v + cmdW * TRACK_WIDTH_M / 2.0f;
     float m = fmaxf(fabsf(vl), fabsf(vr));
     if (m > V_MAX) {                        // proportionale Sättigung
       float s = V_MAX / m;
@@ -470,12 +528,13 @@ void drawDisplay(const DisplayData &d) {
       case 1: st = "FREI"; break;
       case 2: st = "HINDERNIS"; break;
       case 3: st = "keine Sensordaten"; break;
+      case 4: st = "BUMPER"; break;
       default: st = "?"; break;
     }
   }
   snprintf(line, sizeof(line), "Host: %s", st);
   oled.drawStr(0, 22, line);
-  if (fresh && d.hostState == 2) {
+  if (fresh && (d.hostState == 2 || d.hostState == 4)) {
     oled.drawFrame(0, 13, 128, 11);          // Hindernis hervorheben
   }
 
@@ -489,13 +548,23 @@ void drawDisplay(const DisplayData &d) {
   }
   oled.drawStr(0, 34, line);
 
-  // Zeile 4: Radbefehle
-  if (d.cmdTimedOut) {
+  // Zeile 4: Bumper (hat Vorrang) bzw. Radbefehle
+  if (d.bumper != 0) {
+    snprintf(line, sizeof(line), "BUMPER %s!",
+             d.bumper == 3 ? "BEIDE" : (d.bumper == 1 ? "LINKS" : "RECHTS"));
+    oled.drawBox(0, 37, 128, 11);
+    oled.setDrawColor(0);                   // invertierte Schrift
+    oled.drawStr(2, 46, line);
+    oled.setDrawColor(1);
+    line[0] = '\0';
+  } else if (d.cmdTimedOut) {
     snprintf(line, sizeof(line), "Rad: Stopp (Timeout)");
   } else {
     snprintf(line, sizeof(line), "Rad L %+d R %+d", d.wheelLeft, d.wheelRight);
   }
-  oled.drawStr(0, 46, line);
+  if (line[0] != '\0') {
+    oled.drawStr(0, 46, line);
+  }
 
   // Zeile 5: Diagnose Zeitverhalten
   snprintf(line, sizeof(line), "loop %.1f ctl %.1f ms", d.loopMaxUs / 1000.0f, d.ctrlMaxUs / 1000.0f);
@@ -532,9 +601,78 @@ void setupDisplay() {
   oled.begin();
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tf);
-  oled.drawStr(0, 10, "robot_base v5");
-  oled.drawStr(0, 24, "warte auf Agent ...");
   oled.sendBuffer();
+  showScreen("robot_base v6", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
+}
+
+// ---------- Bumper: Interrupt -> Semaphore -> Task (v6) ----------
+void IRAM_ATTR bumperIsr() {
+  bumperIsrUs = micros();
+  BaseType_t woken = pdFALSE;
+  xSemaphoreGiveFromISR(bumperSem, &woken);   // weckt bumperTask, sonst nichts in der ISR
+  if (woken) {
+    portYIELD_FROM_ISR();
+  }
+}
+
+void bumperTask(void *arg) {
+  (void)arg;
+  const int pins[2] = {BUMPER_LEFT_PIN, BUMPER_RIGHT_PIN};
+  bool pressed[2] = {false, false};
+  uint32_t lastLowMs[2] = {0, 0};
+  uint8_t lastState = 0xFF;                 // erzwingt erste Meldung
+  for (;;) {
+    // Warten ohne CPU-Last: Flanke (Semaphore) oder Zeitablauf. Solange ein Bumper gedrückt ist,
+    // kurz pollen, um das Loslassen nach BUMPER_RELEASE_MS zu erkennen; sonst seltene Kontrolle.
+    xSemaphoreTake(bumperSem, pdMS_TO_TICKS(bumperState ? 20 : 200));
+    uint32_t now = millis();
+    for (int i = 0; i < 2; i++) {
+      if (digitalRead(pins[i]) == LOW) {    // gedrückt (oder abgezogen) -> sofort
+        pressed[i] = true;
+        lastLowMs[i] = now;
+      } else if (pressed[i] && now - lastLowMs[i] >= BUMPER_RELEASE_MS) {
+        pressed[i] = false;                 // erst nach stabilem HIGH frei
+      }
+    }
+    uint8_t state = (pressed[0] ? 1 : 0) | (pressed[1] ? 2 : 0);
+    if (state == lastState) {
+      continue;
+    }
+    bool newPress = (state & ~lastState & 0x03) != 0 && lastState != 0xFF;
+    lastState = state;
+    bumperState = state;
+    if (newPress && cmdV > 0.0f) {
+      // sofortiger lokaler Stopp, ohne auf den nächsten Regelschritt zu warten
+      sendMotorFrame(ID_LEFT, MODE_CONT, 0, 0);
+      sendMotorFrame(ID_RIGHT, MODE_CONT, 0, 0);
+      DBG("Bumper %u -> Stopp, %lu us nach Flanke\n", state, (unsigned long)(micros() - bumperIsrUs));
+    } else {
+      DBG("Bumper-Zustand %u\n", state);
+    }
+    if (xSemaphoreTake(dispMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+      dispData.bumper = state;
+      xSemaphoreGive(dispMutex);
+    }
+#if DISPLAY_IN_TASK
+    if (displayTaskHandle != NULL) {
+      xTaskNotifyGive(displayTaskHandle);   // Anzeige sofort aktualisieren
+    }
+#endif
+  }
+}
+
+// /bumper veröffentlichen (nur aus loop(): micro-ROS hat genau einen Nutzer)
+uint8_t lastPubBumper = 0xFF;
+uint32_t lastBumperPubMs = 0;
+void bumperPublishStep() {
+  uint8_t st = bumperState;
+  uint32_t now = millis();
+  if (st != lastPubBumper || now - lastBumperPubMs >= BUMPER_PUB_PERIOD_MS) {
+    bumper_msg.data = st;
+    RCSOFTCHECK(rcl_publish(&bumper_pub, &bumper_msg, NULL));
+    lastPubBumper = st;
+    lastBumperPubMs = now;
+  }
 }
 
 void setupTransport() {
@@ -556,6 +694,10 @@ void setupTransport() {
 }
 
 void setup() {
+  serialMutex = xSemaphoreCreateMutex();
+  uartMutex = xSemaphoreCreateMutex();
+  bumperSem = xSemaphoreCreateBinary();
+
   // Motoren zuerst in definierten Zustand bringen
   Serial2.begin(MOTOR_BAUD, SERIAL_8N1, MOTOR_RX_PIN, MOTOR_TX_PIN);
   stopMotors();
@@ -564,7 +706,10 @@ void setup() {
   pinMode(US_TRIG_PIN, OUTPUT);
   digitalWrite(US_TRIG_PIN, LOW);
   pinMode(US_ECHO_PIN, INPUT);
-  noTone(BUZZER_PIN);                       // Buzzer definiert aus
+  pinMode(BUZZER_PIN, OUTPUT);              // Buzzer definiert aus (noTone() ohne vorherigen Ton
+  digitalWrite(BUZZER_PIN, LOW);            // erzeugte in v5 die LEDC-Fehlermeldung)
+  pinMode(BUMPER_LEFT_PIN, INPUT);          // externe Beschaltung vorhanden (hw_probe), keine internen Pulls
+  pinMode(BUMPER_RIGHT_PIN, INPUT);
 
   dispMutex = xSemaphoreCreateMutex();
   setupDisplay();                           // vor dem Task-Start: nur dieser Kontext nutzt I2C
@@ -607,6 +752,11 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
     "loop_diag"));
 
+  RCCHECK(rclc_publisher_init_default(
+    &bumper_pub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
+    "bumper"));
+
   // Zeit mit dem Agent abgleichen (für Zeitstempel in /range); Fehler ist nicht kritisch
   rmw_uros_sync_session(1000);
   DBG("Zeitabgleich mit Agent: %s\n", rmw_uros_epoch_synchronized() ? "ok" : "nicht verfuegbar");
@@ -619,7 +769,7 @@ void setup() {
   RCCHECK(rclc_executor_add_subscription(
     &executor, &state_sub, &state_msg, &state_callback, ON_NEW_DATA));
 
-  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, /robot_state, Publisher /wheel_cmd, /range, /loop_diag\n");
+  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, /robot_state, Publisher /wheel_cmd, /range, /loop_diag, /bumper\n");
 #if DISPLAY_IN_TASK
   // Display-Task auf Kern 0 (loop() läuft auf Kern 1), Priorität 1, 4 KB Stack
   xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, 1, &displayTaskHandle, 0);
@@ -627,12 +777,19 @@ void setup() {
 #elif DISPLAY_IN_LOOP
   DBG("Display: Vergleichsvariante in loop() (Kern %d)\n", xPortGetCoreID());
 #else
+  showScreen("Messmodus 0:", "Display aus", "(Grundlinie 11d)", NULL);
   DBG("Display: AUS (Grundlinie, nur Startbild)\n");
 #endif
   lastControlMs = millis();
   usLastTriggerMs = millis();
   attachInterrupt(digitalPinToInterrupt(US_ECHO_PIN), echoIsr, CHANGE);
   lastDiagMs = millis();
+
+  // Bumper-Task auf Kern 0, Priorität 2 (über der Display-Task), dann Interrupts aktivieren
+  xTaskCreatePinnedToCore(bumperTask, "bumper", 3072, NULL, 2, &bumperTaskHandle, 0);
+  attachInterrupt(digitalPinToInterrupt(BUMPER_LEFT_PIN), bumperIsr, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(BUMPER_RIGHT_PIN), bumperIsr, CHANGE);
+  DBG("Bumper: Task auf Kern 0, Interrupts GPIO %d/%d\n", BUMPER_LEFT_PIN, BUMPER_RIGHT_PIN);
 }
 
 // Diagnose: einmal pro Sekunde Maxima/Minima veröffentlichen und zurücksetzen
@@ -683,6 +840,7 @@ void loop() {
   ultrasonicStep();
   buzzerStep();
   diagStep();
+  bumperPublishStep();
 
 #if DISPLAY_IN_LOOP
   // Vergleichsvariante: Display blockiert loop() für die Dauer der Übertragung
