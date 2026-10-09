@@ -45,6 +45,9 @@
 // v7.1: STREAM_BEST_EFFORT 1 -> /range, /wheel_cmd, /imu als "best effort" (keine Bestätigung, kein Warten);
 //       /bumper und /loop_diag bleiben "reliable". Host-Subscriber müssen best effort akzeptieren
 //       (qos_profile_sensor_data), sonst kommt keine Verbindung zustande. 0 = alles reliable (wie v7).
+// v7.2: Display zeigt den Gierwinkel auf 0…360° begrenzt (nur Anzeige). Intern, auf /imu und im
+//       seriellen Log bleibt der Winkel fortlaufend (unverändert gegenüber v7.1, getestet in 11f-c).
+//       Stand 09.10.2026: v7.2 getestet (Anzeige bleibt beim Drehen in 0…360°).
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -625,7 +628,11 @@ void drawDisplay(const DisplayData &d) {
       xSemaphoreGive(imuMutex);
     }
     if (ok && im.valid) {
-      snprintf(line, sizeof(line), "Gier %+6.1f  L%3.0fms", im.yawDeg, d.loopMaxUs / 1000.0f);
+      // Nur für die Anzeige auf 0…360° abbilden (fmodf liefert für negative Winkel negative Reste)
+      float shown = fmodf(im.yawDeg, 360.0f);
+      if (shown < 0.0f) shown += 360.0f;
+      if (shown >= 359.95f || shown == 0.0f) shown = 0.0f;  // "360.0" (Rundung) und "-0.0" vermeiden
+      snprintf(line, sizeof(line), "Gier %5.1f  L%3.0fms", shown, d.loopMaxUs / 1000.0f);
     } else {
       snprintf(line, sizeof(line), "IMU --  L%3.0fms", d.loopMaxUs / 1000.0f);
     }
@@ -670,7 +677,7 @@ void setupDisplay() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tf);
   oled.sendBuffer();
-  showScreen("robot_base v7.1", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
+  showScreen("robot_base v7.2", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
 }
 
 // ---------- Bumper: Interrupt -> Semaphore -> Task (v6) ----------
@@ -945,7 +952,7 @@ void setup() {
   imuMutex = xSemaphoreCreateMutex();
   setupDisplay();                           // vor dem Task-Start: nur dieser Kontext nutzt I2C
   bool imuOk = setupImu();                  // Kalibrierung: Roboter muss 3 s stillstehen
-  showScreen("robot_base v7.1", imuOk ? "IMU ok" : "IMU FEHLER", "verbinde WLAN", "und Agent ...");
+  showScreen("robot_base v7.2", imuOk ? "IMU ok" : "IMU FEHLER", "verbinde WLAN", "und Agent ...");
 
   setupTransport();
   delay(2000);

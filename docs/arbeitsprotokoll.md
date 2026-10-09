@@ -34,7 +34,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
 | 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
-| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort), 11g Scheinhindernisse = Bodenecho (Abhilfe offen) |
+| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort), 11g Scheinhindernisse = Bodenecho (Abhilfe offen), 11h Launch-Datei + v7.2 |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
 ---
@@ -1053,6 +1053,39 @@ Wiederholung (Drehung um 270°, `--umdrehungen 0.75`): Sektoren 0–270° prakti
 - Senken von `stop_distance` ist keine Abhilfe (Scheinwerte bis 0,161 m; echte Hindernisse würden zu spät erkannt).
 - Mögliche Abhilfe: Sensor dauerhaft leicht nach oben neigen und/oder höher montieren; Erfolg mit `range_scan.py` an derselben Stelle prüfen (kein Sektor-Median < 0,25 m) und Gegenprobe mit niedrigem Hindernis in 20 cm. Alternativ als Einschränkung dokumentieren (Fahrten parallel zu Fugen bzw. auf fugenfreiem Untergrund).
 
+### 09.10.2026 – Stufe 11h: Launch-Datei für die Host-Seite, Firmware v7.2
+
+**Anlass:** Bei 11g bewegte sich der Roboter zunächst nicht, weil `obstacle_stop` nicht gestartet war. Ziel: gesamte Host-Seite reproduzierbar mit einem Befehl starten (auch für Prüfer und Beleg).
+
+**`launch/robot_launch.py`** (Paket `shape_driver`):
+- startet `obstacle_stop` (`gate`, Standard true) und `distance_warner` (`warner`, true) mit ihren Parameterdateien aus `config/`
+- optional `shape_driver_node` (`figur`, false), **3 s verzögert** (`TimerAction`), damit `obstacle_stop` schon `/range`-Werte hat (sonst sperrt der Fail-safe den Beginn der ersten Seite)
+- Argumente `figur_params` (Standard `config/robot_imu.yaml`), `turn_mode` (imu), `turn_lead_deg` (4.0, Ergebnis 11f-c) – überschreiben die Werte der YAML-Datei (`ParameterValue` mit Typangabe)
+- `gate:=false`: kein `obstacle_stop`, `shape_driver` publiziert direkt auf `/cmd_vel` (Warnung im Log) – so bleibt in jedem Fall genau ein Publisher auf `/cmd_vel`
+- micro-ROS-Agent bewusst **nicht** enthalten (eigenes Terminal), damit die Verbindung zum ESP32 bei Neustart der Nodes bestehen bleibt
+- Einbau: Datei nach `launch/`, `colcon build --packages-select shape_driver` (neue Datei wird erst durch den Build installiert; `data_files` enthält `launch/` und `config/`)
+
+**Test 1 – ohne Fahrt (`ros2 launch shape_driver robot_launch.py`):** ✔ `ros2 node list` → `/distance_warner`, `/obstacle_stop`, `/robot_base`. Hand vor dem Sensor: `HINDERNIS` bei 0,198 m, `FREI` bei 0,251 m (Hysterese 0,20/0,25 m); Buzzer-Stufen aus/800/400/200 ms; Display zeigt die Zustandsmeldungen.
+
+**Test 2 – mit Fahrt (`figur:=true`):** Auf dem **Dielenboden** wieder Sperren (Bodenecho, 11g – auch bei Start parallel zu den Fugen, da Seite 2/4 immer quer zu den Fugen liegen). Auf dem **Schreibtisch** (glatte Fläche, ohne Fugen) ✔:
+- Start 3 s nach den Filter-Nodes, Log `Drehung per IMU, Vorhalt 4.0°` (Launch-Argument wirkt), keine `HINDERNIS`-Meldung während der Fahrt; Viereck laut Nutzer „perfekt“
+- `shape_driver` beendet sich sauber, `obstacle_stop`/`distance_warner` laufen weiter; Strg+C beendet beide sauber
+
+| Ecke | beim Stopp | nach 0,5 s | Nachdrehen | Fehler |
+|---|---|---|---|---|
+| 1 | 86,25° | 90,11° | +3,86° | +0,11° |
+| 2 | 86,38° | 90,84° | +4,46° | +0,84° |
+| 3 | 87,18° | 90,43° | +3,24° | +0,43° |
+| 4 | 86,04° | 88,37° | +2,32° | −1,63° |
+
+Mittleres Nachdrehen +3,47° (11f-c: +3,2° bzw. 3,42–3,81° direkt) → Vorhalt 4° passt weiterhin; Summe der Fehler −0,25°. Ecke 4 dreht weniger nach (nach der letzten Ecke folgt DONE/Stillstand statt FORWARD) – Beobachtung bei n = 1, Ursache nicht untersucht. Die `distance_warner`-Stufen 800/400 ms während der Fahrt stammen von Gegenständen auf dem Tisch in 0,35–0,5 m; die Sperre bei 0,160 m nach Fahrtende (Dauerton) trat erst nach `DONE` auf (vermutlich Hand beim Aufnehmen – nicht protokolliert).
+
+⚠ Auf dem Schreibtisch erkennt der nach vorn gerichtete Ultraschallsensor **keine Tischkante** → nur mit ausreichendem Randabstand fahren, Hand am Akkuschalter.
+
+**Vorhersage aus dem Scan (11g), ungeprüft:** Die Scheinwerte treten nur in schmalen Sektoren um die Querrichtung zu den Fugen auf (30–60° und 300–330° frei). Bei Start **45° schräg zu den Fugen** sollte das Viereck auch auf dem Dielenboden ohne Sperren laufen.
+
+**Firmware v7.2:** Display zeigte den fortlaufend integrierten Gierwinkel (z. B. 720° nach zwei Umdrehungen). Jetzt nur in der **Anzeige** auf 0…359,9° abgebildet (`fmodf`, Korrektur negativer Reste; Sonderfälle „360.0“ durch Rundung und „−0.0“ abgefangen, am PC mit C-Testprogramm geprüft). Interner Winkel, `/imu` und serielles Log unverändert fortlaufend → getestete Drehregelung (11f-c) nicht berührt. Startbild „robot_base v7.2“. ✔ Anzeige bleibt beim Drehen in 0…360°.
+
 ---
 
 ## Offene Punkte
@@ -1061,6 +1094,7 @@ Wiederholung (Drehung um 270°, `--umdrehungen 0.75`): Sektoren 0–270° prakti
 - [x] Firmware v5.1: Fehleranzeige, Buzzer-Pin, Startbild Modus 0 (09.10.2026)
 - [x] Grundlast der Schleife: Ursache reliable-Publisher über WLAN, mit best effort weitgehend behoben (11f-b)
 - [x] Scheinhindernisse 0,16–0,18 m (Seiten 2 und 4): Ursache Bodenecho an Dielenfugen quer zur Schallrichtung, Sensorhöhe 2,5 cm (11g)
+- [ ] Viereck auf dem Dielenboden mit Start 45° schräg zu den Fugen (Vorhersage aus 11g prüfen) – optional
 - [ ] Abhilfe Bodenecho: Sensor leicht nach oben neigen/höher montieren, mit `range_scan.py` und niedrigem Hindernis prüfen; danach Viereck über `obstacle_stop` wiederholen (Positionswerte)
 - [ ] IMU gegen Zeit bei veränderten Bedingungen (anderer Untergrund, schwächerer Akku) – Nutzen der Rückführung nachweisen (optional)
 - [ ] Regelschritt in eigene periodische Task (`vTaskDelayUntil`) statt Prüfung in `loop()` – Verspätung um bis zu einen Durchlauf beseitigen (optional; micro-ROS-Aufrufe bleiben in `loop()`)
