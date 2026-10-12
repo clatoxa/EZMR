@@ -15,7 +15,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         # Launchfiles und Parameterdateien installieren
         (os.path.join('share', package_name, 'launch'), glob('launch/*')),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml') + glob('config/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -34,6 +34,9 @@ setup(
         'calib_drive = shape_driver.calib_drive:main',
         'obstacle_stop = shape_driver.obstacle_stop:main',
         'distance_warner = shape_driver.distance_warner:main',
+	'wander = shape_driver.wander:main',
+	'odom = shape_driver.odom:main',
+	'sonar_map = shape_driver.sonar_map:main',
         ],
     },
 )

@@ -48,6 +48,13 @@
 // v7.2: Display zeigt den Gierwinkel auf 0…360° begrenzt (nur Anzeige). Intern, auf /imu und im
 //       seriellen Log bleibt der Winkel fortlaufend (unverändert gegenüber v7.1, getestet in 11f-c).
 //       Stand 09.10.2026: v7.2 getestet (Anzeige bleibt beim Drehen in 0…360°).
+// v7.3 (Stufe 11i): Subscriber /imu_reset (std_msgs/UInt8): 1 = Gyro-Nullpunkt 3 s neu messen und
+//       Gierwinkel auf 0 setzen, 0 = nur Winkel auf 0. Nur im Stillstand (beide Räder param 0); fährt
+//       der Roboter an, wird die Messung verworfen. Neuer Nullpunkt wird nur übernommen, wenn er um
+//       weniger als IMU_RECAL_MAX_DPS vom alten abweicht (sonst wurde der Roboter bewegt). Während der
+//       Messung bleibt der Winkel stehen, Display zeigt "IMU kalibriert". Anlass: Drift ≈ −0,3 °/s nach
+//       längerer Betriebszeit (Test O1), Nullpunkt wurde bisher nur beim Einschalten bestimmt.
+//       Stand 09.10.2026: v7.3 UNGETESTET.
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -165,6 +172,7 @@ static const float    ACCEL_LSB_PER_G       = 16384.0f;  // ±2 g
 static const float    G_MPS2                = 9.80665f;
 static const uint32_t IMU_PERIOD_MS         = 10;        // 100 Hz
 static const uint32_t IMU_CALIB_MS          = 3000;      // Stillstand beim Start
+static const float    IMU_RECAL_MAX_DPS     = 5.0f;      // max. Änderung des Nullpunkts bei /imu_reset
 static const uint32_t IMU_PUB_PERIOD_MS     = 50;        // 20 Hz
 static const uint32_t I2C_WAIT_MS           = 20;        // max. Wartezeit auf den Bus
 
@@ -188,6 +196,8 @@ rcl_subscription_t buzzer_sub;
 std_msgs__msg__UInt16 buzzer_msg;
 rcl_subscription_t state_sub;
 std_msgs__msg__UInt8 state_msg;
+rcl_subscription_t imu_reset_sub;
+std_msgs__msg__UInt8 imu_reset_msg;
 rcl_publisher_t diag_pub;
 rcl_publisher_t bumper_pub;
 std_msgs__msg__UInt8 bumper_msg;
@@ -252,12 +262,15 @@ struct ImuData {
   int64_t  stampNs;         // Zeitstempel (Epoch, nach Zeitabgleich) der Messung
   uint32_t maxDtUs;         // größter Abtastabstand seit letzter Abfrage
   uint32_t errors;          // I2C-Lesefehler gesamt
+  bool     calibrating;     // v7.3: Nullpunktmessung nach /imu_reset läuft
 };
-ImuData imuData = {false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+ImuData imuData = {false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false};
 SemaphoreHandle_t imuMutex = NULL;   // schützt imuData
 SemaphoreHandle_t i2cMutex = NULL;   // schützt den I2C-Bus (Display + IMU)
 TaskHandle_t imuTaskHandle = NULL;
-float gyroBias[3] = {0, 0, 0};       // °/s
+float gyroBias[3] = {0, 0, 0};       // °/s (nur setup() und imuTask)
+volatile uint8_t imuResetRequest = 0;   // v7.3: 0 keine, 1 nur Winkel 0, 2 Nullpunkt + Winkel 0 (loop -> imuTask)
+volatile bool wheelsStopped = true;     // v7.3: beide Räder param 0 (controlStep -> imuTask)
 SemaphoreHandle_t dispMutex = NULL;   // schützt dispData
 TaskHandle_t displayTaskHandle = NULL;
 
@@ -405,6 +418,7 @@ void controlStep() {
   WheelCmd r = wheelSpeedToCmd(vr, DIR_FWD_RIGHT);
   applyWheel(ID_LEFT, l, lastLeft, lastSentLeftMs);
   applyWheel(ID_RIGHT, r, lastRight, lastSentRightMs);
+  wheelsStopped = (l.param == 0) && (r.param == 0);
 
   wheel_cmd_msg.x = signedParam(l, DIR_FWD_LEFT);
   wheel_cmd_msg.y = signedParam(r, DIR_FWD_RIGHT);
@@ -540,6 +554,15 @@ void buzzerStep() {
 }
 
 // /robot_state vom Host (obstacle_stop): Zustandswechsel weckt die Display-Task sofort
+// v7.3: Anfrage nur vormerken; Ausführung und Stillstandsprüfung in imuTask
+void imu_reset_callback(const void *msgin) {
+  const std_msgs__msg__UInt8 *msg = (const std_msgs__msg__UInt8 *)msgin;
+  if (imuResetRequest == 0) {
+    imuResetRequest = msg->data ? 2 : 1;
+    DBG("IMU-Reset angefordert (%s)\n", msg->data ? "Nullpunkt + Winkel" : "nur Winkel");
+  }
+}
+
 void state_callback(const void *msgin) {
   const std_msgs__msg__UInt8 *msg = (const std_msgs__msg__UInt8 *)msgin;
   bool changed = false;
@@ -627,7 +650,9 @@ void drawDisplay(const DisplayData &d) {
       ok = true;
       xSemaphoreGive(imuMutex);
     }
-    if (ok && im.valid) {
+    if (ok && im.valid && im.calibrating) {
+      snprintf(line, sizeof(line), "IMU kalibriert...");
+    } else if (ok && im.valid) {
       // Nur für die Anzeige auf 0…360° abbilden (fmodf liefert für negative Winkel negative Reste)
       float shown = fmodf(im.yawDeg, 360.0f);
       if (shown < 0.0f) shown += 360.0f;
@@ -677,7 +702,7 @@ void setupDisplay() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tf);
   oled.sendBuffer();
-  showScreen("robot_base v7.2", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
+  showScreen("robot_base v7.3", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
 }
 
 // ---------- Bumper: Interrupt -> Semaphore -> Task (v6) ----------
@@ -814,6 +839,10 @@ void imuTask(void *arg) {
   TickType_t lastWake = xTaskGetTickCount();
   uint32_t lastUs = micros();
   float yaw = 0.0f;
+  bool calibrating = false;                  // v7.3
+  double csum[3] = {0, 0, 0};
+  int cn = 0;
+  uint32_t cstart = 0;
   for (;;) {
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(IMU_PERIOD_MS));
     int16_t v[7];
@@ -833,10 +862,51 @@ void imuTask(void *arg) {
     }
     uint32_t dtUs = nowUs - lastUs;
     lastUs = nowUs;
+
+    // v7.3: Rücksetzen / Nullpunkt neu messen (nur im Stillstand)
+    uint8_t req = imuResetRequest;
+    if (req != 0 && !calibrating) {
+      imuResetRequest = 0;
+      if (!wheelsStopped) {
+        DBG("IMU-Reset verworfen: Roboter faehrt\n");
+      } else if (req == 1) {
+        yaw = 0.0f;
+        DBG("IMU: Gierwinkel auf 0 gesetzt\n");
+      } else {
+        calibrating = true;
+        csum[0] = csum[1] = csum[2] = 0.0;
+        cn = 0;
+        cstart = millis();
+      }
+    } else if (req != 0) {
+      imuResetRequest = 0;                   // weitere Anfragen während der Messung ignorieren
+    }
+    if (calibrating) {
+      if (!wheelsStopped) {
+        calibrating = false;
+        DBG("IMU-Nullpunktmessung abgebrochen: Roboter faehrt (alter Nullpunkt bleibt)\n");
+      } else {
+        for (int i = 0; i < 3; i++) csum[i] += v[4 + i] / GYRO_LSB_PER_DPS;
+        cn++;
+        if (millis() - cstart >= IMU_CALIB_MS && cn > 0) {
+          float nb[3];
+          for (int i = 0; i < 3; i++) nb[i] = (float)(csum[i] / cn);
+          if (fabsf(nb[2] - gyroBias[2]) < IMU_RECAL_MAX_DPS) {
+            DBG("IMU: Nullpunkt gz %+.4f -> %+.4f °/s (n = %d), Gierwinkel 0\n", gyroBias[2], nb[2], cn);
+            for (int i = 0; i < 3; i++) gyroBias[i] = nb[i];
+            yaw = 0.0f;
+          } else {
+            DBG("IMU: neuer Nullpunkt %+.3f °/s unplausibel (alt %+.3f) – verworfen\n", nb[2], gyroBias[2]);
+          }
+          calibrating = false;
+        }
+      }
+    }
+
     float gx = v[4] / GYRO_LSB_PER_DPS - gyroBias[0];
     float gy = v[5] / GYRO_LSB_PER_DPS - gyroBias[1];
     float gz = v[6] / GYRO_LSB_PER_DPS - gyroBias[2];
-    if (dtUs < 100000) {                     // nach langer Pause (z. B. Busfehler) nicht integrieren
+    if (dtUs < 100000 && !calibrating) {     // nach langer Pause bzw. während der Messung nicht integrieren
       yaw += gz * dtUs * 1e-6f;
     }
     int64_t stamp = rmw_uros_epoch_synchronized() ? rmw_uros_epoch_nanos() : 0;
@@ -848,6 +918,7 @@ void imuTask(void *arg) {
       imuData.ay = v[1] / ACCEL_LSB_PER_G;
       imuData.az = v[2] / ACCEL_LSB_PER_G;
       imuData.stampNs = stamp;
+      imuData.calibrating = calibrating;
       if (dtUs > imuData.maxDtUs) imuData.maxDtUs = dtUs;
       xSemaphoreGive(imuMutex);
     }
@@ -952,7 +1023,7 @@ void setup() {
   imuMutex = xSemaphoreCreateMutex();
   setupDisplay();                           // vor dem Task-Start: nur dieser Kontext nutzt I2C
   bool imuOk = setupImu();                  // Kalibrierung: Roboter muss 3 s stillstehen
-  showScreen("robot_base v7.2", imuOk ? "IMU ok" : "IMU FEHLER", "verbinde WLAN", "und Agent ...");
+  showScreen("robot_base v7.3", imuOk ? "IMU ok" : "IMU FEHLER", "verbinde WLAN", "und Agent ...");
 
   setupTransport();
   delay(2000);
@@ -987,6 +1058,11 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "robot_state"));
 
+  RCCHECK(rclc_subscription_init_default(
+    &imu_reset_sub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
+    "imu_reset"));
+
   RCCHECK(rclc_publisher_init_default(
     &diag_pub, &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
@@ -1007,15 +1083,17 @@ void setup() {
   rmw_uros_sync_session(1000);
   DBG("Zeitabgleich mit Agent: %s\n", rmw_uros_epoch_synchronized() ? "ok" : "nicht verfuegbar");
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));  // 3 Subscriber
+  RCCHECK(rclc_executor_init(&executor, &support.context, 4, &allocator));  // 4 Subscriber (v7.3)
   RCCHECK(rclc_executor_add_subscription(
     &executor, &cmd_vel_sub, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &buzzer_sub, &buzzer_msg, &buzzer_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &state_sub, &state_msg, &state_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &imu_reset_sub, &imu_reset_msg, &imu_reset_callback, ON_NEW_DATA));
 
-  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, /robot_state, Publisher /wheel_cmd, /range, /loop_diag, /bumper, /imu\n");
+  DBG("micro-ROS bereit: Node /robot_base, Subscriber /cmd_vel, /buzzer, /robot_state, /imu_reset, Publisher /wheel_cmd, /range, /loop_diag, /bumper, /imu\n");
   DBG("Sensorströme: %s\n", STREAM_BEST_EFFORT ? "best effort" : "reliable");
 #if DISPLAY_IN_TASK
   // Display-Task auf Kern 0 (loop() läuft auf Kern 1), Priorität 1, 4 KB Stack

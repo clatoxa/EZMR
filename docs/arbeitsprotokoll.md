@@ -34,7 +34,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
 | 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
-| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort), 11g Scheinhindernisse = Bodenecho (Abhilfe offen), 11h Launch-Datei + v7.2 |
+| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort), 11g Scheinhindernisse = Bodenecho (Abhilfe offen), 11h Launch-Datei + v7.2, 11i Erkundung mit Ultraschallkarte (wander/odom/sonar_map, v7.3) |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
 ---
@@ -1020,7 +1020,7 @@ Host: obstacle_stop abonniert /bumper → vorwärts gesperrt, /robot_state = 4 (
 **Werkzeug:** `tools/range_scan.py` (neu) – Roboter dreht auf der Stelle (nur `angular.z` = 0,3692 rad/s über `/cmd_vel_raw` → `obstacle_stop`), jeder `/range`-Wert wird mit dem Gierwinkel aus `/imu` gespeichert; Ausgabe je 15°-Sektor (Median/Min/Max, Anzahl nan/inf), Rohdaten als CSV. Winkel gegen den Uhrzeigersinn ab Startausrichtung (0° = Seite 1, 90° = Seite 2, 270° = Seite 4).
 Erster Versuch: Roboter bewegte sich nicht → `ros2 node list` zeigte nur `/robot_base`; `obstacle_stop` war nicht gestartet (Befehle auf `/cmd_vel_raw` wurden nicht weitergeleitet). Nach Start lief das Skript wie vorgesehen.
 
-**Untergrund:** Laminat/Vinyl in Dielenoptik; Startausrichtung (Seite 1/3) **parallel** zu den langen Fugen, Seite 2/4 **quer** dazu (Foto). Sensorhöhe über dem Boden ≈ **2,5 cm**.
+**Untergrund:** Laminat/Vinyl in Dielenoptik; Startausrichtung (Seite 1/3) **parallel** zu den langen Fugen, Seite 2/4 **quer** dazu (Foto). Sensor ≈ 3 cm über dem aufliegenden Bumper bzw. Boden (Bezug noch zu klären; Korrektur 11i: die zuerst notierten „2,5 cm“ waren die Dicke der Unterlage, nicht die Sensorhöhe). Der Roboter hat vorn kein Rad und liegt auf der Rahmenkante auf → Chassis vermutlich leicht nach vorn geneigt (Hinweis Nutzer, nicht gemessen).
 
 **Scan an der Startposition** (ohne Hindernisse im Umkreis, 178 Werte; Auszug):
 
@@ -1044,9 +1044,9 @@ Wiederholung (Drehung um 270°, `--umdrehungen 0.75`): Sektoren 0–270° prakti
 | Sichtprüfung | nichts im Raum vor dem Sensor | H1 ✗ |
 | Zollstock: Sensor → zweite Fuge | **30 cm** | entspricht dem Messwert |
 | Blatt Papier flach auf den Boden | 0,172–0,176 m | Echo hängt vom Boden ab (Blattkante/Wölbung als neue Kante – Deutung) |
-| Blatt weg, Vorderseite 1–2 cm unterlegt (Sensor wenige Grad nach oben) | 0,449–0,454 m | Abstand wandert mit der Neigung → Bodenecho |
+| Blatt weg, Vorderseite 2,5 cm unterlegt (Sensor einige Grad nach oben) | 0,449–0,454 m | Abstand wandert mit der Neigung → Bodenecho |
 
-**Ergebnis:** H3 ✗ (nahe Werte nur in zwei Richtungen, sonst bis 3,45 m), H1 ✗ (nichts im Raum; Messwert = Abstand zur Fuge). Alle Versuche passen zu **H2**: Der Sensor sitzt nur ≈ 2,5 cm über dem Boden, der untere Teil des Schallkegels trifft den Boden. **Fugen quer zur Schallrichtung** werfen genug Schall zurück und werden als Hindernis gemessen; parallel zu den Fugen (Seite 1/3) nicht. Beim Drehen kurzzeitig 0,16–0,18 m (nähere Fuge bzw. Fugenstoß), im Stand 0,30 m. Geometrie zur Einordnung: eine Fuge in 30 cm liegt nur ≈ 4,8° (atan 2,5/30), eine in 17 cm ≈ 8,4° unter der Sensorachse. H4 durch die Versuche nicht geprüft, für die Erklärung nicht nötig.
+**Ergebnis:** H3 ✗ (nahe Werte nur in zwei Richtungen, sonst bis 3,45 m), H1 ✗ (nichts im Raum; Messwert = Abstand zur Fuge). Alle Versuche passen zu **H2**: Der Sensor sitzt nur wenige Zentimeter über dem Boden (vermutlich zusätzlich nach vorn geneigt), der untere Teil des Schallkegels trifft den Boden. **Fugen quer zur Schallrichtung** werfen genug Schall zurück und werden als Hindernis gemessen; parallel zu den Fugen (Seite 1/3) nicht. Beim Drehen kurzzeitig 0,16–0,18 m (nähere Fuge bzw. Fugenstoß), im Stand 0,30 m. Geometrie zur Einordnung (Annahme Sensorachse 3 cm über dem Boden und waagerecht): eine Fuge in 30 cm liegt ≈ 5,7° (atan 3/30), eine in 17 cm ≈ 10° unter der Sensorachse – beides innerhalb eines Schallkegels von einigen Grad Halbwinkel. H4 durch die Versuche nicht geprüft, für die Erklärung nicht nötig.
 
 **Folgen:**
 - Positionsangaben der Viereckfahrten über `obstacle_stop` (11f-c) bleiben ungültig; die Sperren waren **korrektes Verhalten des Filters** auf ein falsches Sensorsignal (fail-safe-Richtung: lieber stehen als fahren).
@@ -1086,6 +1086,74 @@ Mittleres Nachdrehen +3,47° (11f-c: +3,2° bzw. 3,42–3,81° direkt) → Vorha
 
 **Firmware v7.2:** Display zeigte den fortlaufend integrierten Gierwinkel (z. B. 720° nach zwei Umdrehungen). Jetzt nur in der **Anzeige** auf 0…359,9° abgebildet (`fmodf`, Korrektur negativer Reste; Sonderfälle „360.0“ durch Rundung und „−0.0“ abgefangen, am PC mit C-Testprogramm geprüft). Interner Winkel, `/imu` und serielles Log unverändert fortlaufend → getestete Drehregelung (11f-c) nicht berührt. Startbild „robot_base v7.2“. ✔ Anzeige bleibt beim Drehen in 0…360°.
 
+### 09.10.2026 – Stufe 11i: Erkundungsfahrt mit Ultraschallkarte
+
+**Ziel:** Roboter fährt selbstständig umher (statt Viereck), schätzt seine Position und erstellt eine Karte aus den Ultraschallmessungen – vereinfachtes Gegenstück zur Lidar-Kartierung (kein Lidar vorhanden; TurtleBot 4/2.5 ausgeschlossen). Erfassung auf dem ESP32 (`/range`, `/imu`, `/wheel_cmd`), Auswertung auf dem Host. Aufbau in vier Bausteinen, jeder einzeln getestet.
+
+```
+wander --/cmd_vel_raw--> obstacle_stop --/cmd_vel--> ESP32
+ESP32 --/wheel_cmd, /imu--> odom --/odom, TF odom->base_link, /odom_path-->
+ESP32 --/range--> sonar_map (+ /odom) --/map--> RViz2; beim Beenden Karte als Datei
+```
+
+#### Baustein 1 – Zufallsfahrt `wander.py`
+Zustandsautomat (20 Hz): FORWARD bis `/robot_state` = HINDERNIS (2) oder BUMPER (4) → BACKUP 1 s (≈ 3 cm, hinten kein Sensor) → TURN um Zufallswinkel, IMU-geregelt mit Vorhalt 4° (wie 11f-c) → SETTLE 0,5 s → FORWARD. Fährt über `/cmd_vel_raw` (obstacle_stop bleibt einziger Publisher auf `/cmd_vel`); ohne aktuelle `/robot_state`- oder `/imu`-Daten (> 1 s) Stillstand. Vorab Simulation am PC (Raum 1 × 1 m, 70 s): bleibt im Raum, Drehungen auf ≈ 1° genau.
+
+**Test W1** (Dielenboden, 60 s, `robot_launch.py` + `ros2 run shape_driver wander`): ✔ 1× BUMPER nach 18,8 s (**niedriges Hindernis**, vom Ultraschall nicht erkannt – Bumper als zweite Ebene), 1× Hindernis; Drehungen +118,6° (Ziel +120°), −138,2° (−140°); 2× kurz „keine Sensordaten“ (0,15 s / 0,55 s, vermutlich WLAN) → angehalten, danach weiter (fail-safe korrekt).
+
+#### Baustein 2 – Odometrie `odom.py`
+- Strecke aus **`/wheel_cmd`** (tatsächlich an die Motoren gesendete param-Werte nach Firmware-Timeout, lokaler Bumper-Sperre und Rundung) statt `/cmd_vel`: Radgeschwindigkeit = π · d / 2048 · 1000 / param mit **wirksamem Durchmesser d = 81,6 mm** (K1, 9b). Befehle gelten bis zur nächsten Nachricht (Motoren laufen weiter), Lücken höchstens 0,5 s integriert.
+- Richtung aus `/imu` (ohne IMU: aus Raddifferenz mit wirksamer Spur 166,5 mm, K2).
+- Ausgabe `/odom`, TF `odom → base_link`, `/odom_path`; Log alle 10 s.
+
+**Test O1** (Viereck auf dem Schreibtisch über `robot_launch.py figur:=true`): Strecke 1,20 m (Soll 4 × 0,30 m), Endpunkt (−0,015; +0,046) m → **4,8 cm** vom Start, Endrichtung 323,1°. **Befund:** Im Stillstand vor und nach der Fahrt änderte sich die Richtung um −3,1° je 10 s = **−0,31 °/s**; korrigiert um diese Drift ergibt sich ≈ 360°. Beim IMU-Test (11f-a) direkt nach dem Kalibrieren nur ≈ 0,3 °/min. Vermutete Ursache: Gyro-Nullpunkt wird nur beim Einschalten bestimmt, Sensor seither (≈ 45 min) erwärmt – nicht nachgewiesen.
+
+**Driftkorrektur im Stillstand** (Zero-Velocity-Update): Beide Räder seit ≥ 1 s param 0 (nach dem Auslaufen) → Richtung einfrieren, IMU-Änderung als Drift lernen (gleitender Mittelwert, Zeitkonstante 5 s); während der Fahrt abziehen. Simulation (−0,31 °/s, 10 s Stillstand): Endpunkt ohne Korrektur (−0,037; +0,054) m / 336,7°, mit Korrektur (−0,007; +0,007) m / 356,9°.
+
+**Test O2** (wie O1, ≥ 20 s Stillstand vor der Fahrt): ✔
+
+| | O1 (ohne Korrektur) | O2 (mit Korrektur) |
+|---|---|---|
+| Richtung im Stillstand | −3,1° je 10 s | konstant |
+| gelernte Drift | – | −0,307 °/s (59 s Stillstand) |
+| berechneter Endpunkt | (−0,015; +0,046) m | **(+0,002; −0,001) m** |
+| Endrichtung | 323,1° | **360,4°** |
+| echter Roboter | – | „sehr genau“ am Start (Einschätzung Nutzer) |
+
+Zwischenpunkte (0,30; 0), (0,30; 0,30), (0; 0,30) m; in RViz2 sauberes Quadrat (Screenshot `docs/bilder/o2_odometrie_viereck.png`). Einschränkung: Einzelfahrt auf glattem Untergrund; Schlupf/Schrittverluste werden nicht erkannt. Über 35 min Stillstand blieb die gelernte Drift bei −0,29 … −0,32 °/s (gleichbleibender Nullpunktfehler).
+
+#### Baustein 3 – Ultraschallkarte `sonar_map.py`
+Belegungsraster (Occupancy Grid, Log-Odds) 6 × 6 m, Zellen 2 cm, Ursprung am Start. Sensorpose aus `/odom` + Einbauort **10 cm vor der Radachse, 2 cm seitlich** (gemessen; Seite noch zu bestätigen, angenommen links → `sensor_y = +0,02`). Schallkegel durch 7 Strahlen angenähert (±7,5° – **Annahme**, Datenblattangabe „15°“ nicht eindeutig): Zellen entlang der Strahlen „frei“, am Messwert „belegt“ (Gewicht über den Bogen verteilt); `inf` nur „frei“ bis 1 m; Werte > 1,5 m nur „frei“; nan/−inf ignoriert. `/map` (transient local) für RViz2; bei Strg+C Speicherung nach `~/messungen/karten/` als `.pgm` + `.yaml` (map_server-Format) und `_weg.ppm` (Weg rot, Start grün). Simulation (Wände bei x = 1,0 m und y = 0,6 m): Wände an richtiger Stelle belegt, davor frei, hinter dem Roboter unbekannt.
+
+**Test M1** (Schreibtisch, Drehung 360,6° auf der Stelle mit `range_scan.py`): ✔ Karte zeigt freien „Stern“ und Bögen an den Gegenständen:
+
+| Richtung | Scan (Median) | tatsächlich (Nutzer) |
+|---|---|---|
+| links (60–105°) | 0,37 m | Monitorfuß ≈ 35 cm |
+| rechts (225–300°) | 0,30 m | Buch ≈ 30 cm |
+| vorn (0°/345°) | 0,77 m | Wand ≈ 75 cm |
+| hinten links (105–150°) | 3,0 m | frei (bis 1,5 m eingetragen) |
+
+Bögen werden mit der Entfernung länger (Kegelbreite = Unsicherheit der Richtung).
+
+RViz2: Konfiguration `config/explore.rviz` (Fixed Frame `odom`, Path, Odometry, Map mit Durability *Transient Local*); `setup.py` installiert jetzt auch `config/*.rviz`. Hinweis: Map-Topic in RViz2 über *Add → By topic* wählen (leeres Topic-Feld führte zu „Error subscribing: Empty topic name“).
+
+#### Baustein 4 – `launch/explore_launch.py`
+Startet obstacle_stop, distance_warner, odom, sonar_map, RViz2; wander nach `wander_delay` = 20 s (Driftschätzung). Argumente u. a. `duration`, `sensor_y`, `turn_min_deg`/`turn_max_deg`, `fwd_min`/`fwd_max`, `imu_reset`. Strg+C beendet alles, sonar_map speichert dabei die Karte. (Meldung „Failed to publish log message to rosout“ nach Strg+C ist harmlos – Log nach dem Herunterfahren.)
+
+| Test | Einstellung | Ergebnis | Befund → Änderung |
+|---|---|---|---|
+| E1 | Drehung 90–180°, 120 s | ✔ 2,57 m, 5 Hindernisse, 0 Bumper, keine Lücken, Drift −0,30 °/s | Wunsch Nutzer: immer ±90° → rechtwinklige Bahn; bei Start 45° zu den Fugen bleiben alle Fahrtrichtungen schräg zu den Fugen (11g) |
+| E2 | ±90°, 180 s | Weg verzerrt: Drift falsch gelernt (+10,2 °/s → +0,99 °/s statt −0,30) – Roboter wurde nach dem Start von Hand ausgerichtet; Richtung lief bei Geradeausfahrt −14° → −28°; in Ecken Pendeln (−90/+90/−90 …), 16 Hindernisse, 18 Drehungen, 2 Bumper | odom: Änderungen > 1,5 °/s im Stillstand gelten als „von Hand bewegt“ und werden nicht gelernt; wander: direkt nach einer Drehung wieder blockiert → **gleiche Richtung** weiterdrehen |
+| E3 | wie E2, Roboter vor dem Start ausgerichtet | ✔ Drift −0,278 °/s; Richtung bei Geradeausfahrt konstant (z. B. −182,1 → −182,6°); kein Pendeln; 180 s, 3,25 m, 13 Hindernisse, 1 Bumper, 14 Drehungen; Umriss der Fläche gut erkennbar | Weg pendelt auf **einer Linie** hin und her (2 × 90° gleiche Richtung = Wende) → wander biegt nach zufälliger Fahrzeit 6–15 s auch ohne Hindernis ab (`fwd_min`/`fwd_max`) |
+
+#### Firmware v7.3 – IMU-Nullpunkt per Topic neu messen
+Subscriber `/imu_reset` (std_msgs/UInt8): 1 = Gyro-Nullpunkt 3 s neu messen und Gierwinkel auf 0, 0 = nur Winkel 0. Ausführung in der imuTask, **nur im Stillstand** (beide Räder param 0, Flag aus `controlStep`); fährt der Roboter an, wird abgebrochen. Neuer Nullpunkt nur übernommen, wenn er < 5 °/s vom alten abweicht. Während der Messung bleibt der Winkel stehen, Display „IMU kalibriert…“. Executor 4 Subscriber. `explore_launch.py` sendet `/imu_reset` beim Start (3× im Abstand von 1 s; weitere Anfragen während der Messung ignoriert). Auswirkung auf andere Nodes: odom verwirft den Winkelsprung im Stillstand (Grenze 1,5 °/s); wander/shape_driver/range_scan wären nur bei einem Reset **während** einer Drehung betroffen – durch die Stillstandsbedingung ausgeschlossen. Zusätzlich beginnt odom jetzt bei exakt 0,0° (vorher −0,3° durch die erste Sekunde vor dem Einfrieren).
+Aufspielen: erster Versuch „Failed to communicate with the flash chip“ – **linker Bumper (GPIO12) steckte**; nach Abziehen ✔ (Startbild „robot_base v7.3“).
+Stand: v7.3, Richtungswechsel ohne Hindernis und `imu_reset` im Launch **ungetestet** (Akku wird geladen) → Tests R1 (Reset ohne Fahrt) und E4 (Erkundung) ausstehend.
+
+**Bewertung bisher:** Die Kette Zufallsfahrt → Odometrie → Karte funktioniert mit einem Befehl. Die Kartenqualität wird begrenzt durch (1) den einzelnen, breiten Ultraschallstrahl (unscharfe Bögen statt Konturen), (2) die Odometrie ohne Radsensoren und ohne Korrektur durch die Karte (kein SLAM), (3) Bodenecho an Fugen (11g). Der wichtigste gefundene Fehler war die Gyro-Drift nach längerer Betriebszeit; sie wird jetzt doppelt behandelt (Nullpunkt neu messen auf dem ESP32, Driftschätzung im Stillstand auf dem Host).
+
 ---
 
 ## Offene Punkte
@@ -1093,7 +1161,10 @@ Mittleres Nachdrehen +3,47° (11f-c: +3,2° bzw. 3,42–3,81° direkt) → Vorha
 **Technisch**
 - [x] Firmware v5.1: Fehleranzeige, Buzzer-Pin, Startbild Modus 0 (09.10.2026)
 - [x] Grundlast der Schleife: Ursache reliable-Publisher über WLAN, mit best effort weitgehend behoben (11f-b)
-- [x] Scheinhindernisse 0,16–0,18 m (Seiten 2 und 4): Ursache Bodenecho an Dielenfugen quer zur Schallrichtung, Sensorhöhe 2,5 cm (11g)
+- [x] Scheinhindernisse 0,16–0,18 m (Seiten 2 und 4): Ursache Bodenecho an Dielenfugen quer zur Schallrichtung (11g)
+- [ ] 11i: Test R1 (`/imu_reset` ohne Fahrt) und E4 (Erkundung mit v7.3 und freiwilligem Richtungswechsel) – nach dem Laden des Akkus
+- [ ] Sensor: Höhe über dem Boden und Seite des Versatzes (links/rechts) bestätigen → `sensor_y` ggf. auf −0,02
+- [ ] Optional: Kegelbreite (`cone_half_deg`) mit einem Gegenstand in bekanntem Abstand/Winkel prüfen
 - [ ] Viereck auf dem Dielenboden mit Start 45° schräg zu den Fugen (Vorhersage aus 11g prüfen) – optional
 - [ ] Abhilfe Bodenecho: Sensor leicht nach oben neigen/höher montieren, mit `range_scan.py` und niedrigem Hindernis prüfen; danach Viereck über `obstacle_stop` wiederholen (Positionswerte)
 - [ ] IMU gegen Zeit bei veränderten Bedingungen (anderer Untergrund, schwächerer Akku) – Nutzen der Rückführung nachweisen (optional)
