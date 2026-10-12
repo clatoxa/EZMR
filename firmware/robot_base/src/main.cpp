@@ -54,7 +54,15 @@
 //       weniger als IMU_RECAL_MAX_DPS vom alten abweicht (sonst wurde der Roboter bewegt). Während der
 //       Messung bleibt der Winkel stehen, Display zeigt "IMU kalibriert". Anlass: Drift ≈ −0,3 °/s nach
 //       längerer Betriebszeit (Test O1), Nullpunkt wurde bisher nur beim Einschalten bestimmt.
-//       Stand 09.10.2026: v7.3 UNGETESTET.
+//       Stand 12.10.2026: v7.3 getestet (E4: gelernte Drift danach ≈ 0 °/s).
+// v7.4 (Stufe 12, optional OTA nach Anleitung 4.1.4): Firmware-Update über WLAN (ArduinoOTA, nur env wifi/ota).
+//       Passwort OTA_PASSWORD aus secrets.h (Pflicht). Bei Update-Beginn sofort beide Motoren stoppen –
+//       während des Uploads hängt loop() in ArduinoOTA.handle(), Timeout-Stopp und micro-ROS laufen dann
+//       nicht. Display-Task (Kern 0) zeigt "OTA-Update" mit Fortschritt. IP-Adresse 10 s nach Start im Display.
+//       Stand 12.10.2026: v7.4 getestet (OTA-1: Upload über WLAN ✔, Hostname ezmr-robot.local per mDNS erreichbar).
+// v7.4.1: ArduinoOTA.handle() auch in error_loop() – Update über WLAN ist damit auch möglich, wenn der
+//       Agent nicht erreichbar ist (vorher blieb der ESP32 in der Fehlerschleife ohne OTA).
+//       Stand 12.10.2026: v7.4.1 getestet (per OTA aufgespielt; OTA-3: Motorstopp bei Update-Beginn ✔).
 // Transport wird über die PlatformIO-Umgebung gewählt (env:serial / env:wifi).
 #include <Arduino.h>
 #include <math.h>
@@ -76,9 +84,15 @@
 
 #if defined(MICRO_ROS_TRANSPORT_ARDUINO_WIFI)
 #include "secrets.h"            // lokal, nicht im Repository (Vorlage: secrets.h.example)
+#include <ArduinoOTA.h>         // v7.4
+#ifndef OTA_PASSWORD
+#error "OTA_PASSWORD fehlt in include/secrets.h (siehe secrets.h.example)"
+#endif
+#define OTA_ENABLED 1
 #define DEBUG_ENABLED 1         // Serial ist frei -> Statusausgaben erlaubt
 #elif defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
 #define DEBUG_ENABLED 0         // Serial ist micro-ROS-Transport -> KEINE Ausgaben
+#define OTA_ENABLED 0           // OTA nur mit WLAN
 #else
 #error Nur die Transporte serial und wifi werden unterstuetzt.
 #endif
@@ -252,6 +266,9 @@ struct DisplayData {
   uint32_t ctrlMaxUs;
 };
 DisplayData dispData = {NAN, 0, 0, 0, 0, 0, true, 0, 0, 0};
+volatile int8_t otaPercent = -1;        // v7.4: -1 kein Update, sonst Fortschritt 0…100 (für Display-Task)
+char robotIp[16] = "-";                 // v7.4: eigene IP (für Display und OTA-upload_port)
+uint32_t displayStartMs = 0;            // v7.4: Start der Display-Task (IP 10 s anzeigen)
 
 // IMU-Daten: geschrieben von imuTask, gelesen von loop() und Display
 struct ImuData {
@@ -338,10 +355,15 @@ void error_loop(int line) {
   if (displayTaskHandle == NULL) {
     char buf[24];
     snprintf(buf, sizeof(buf), "micro-ROS Zeile %d", line);
-    showScreen("FEHLER", buf, "Agent erreichbar?", "Agent starten, EN");
+    showScreen("FEHLER", buf, "Agent erreichbar?", OTA_ENABLED ? "Agent+EN oder OTA" : "Agent starten, EN");
   }
   while (1) {
+#if OTA_ENABLED
+    ArduinoOTA.handle();                     // v7.4.1: Update auch ohne Agent möglich
+    delay(10);
+#else
     delay(100);
+#endif
   }
 }
 
@@ -585,8 +607,20 @@ void drawDisplay(const DisplayData &d) {
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tf);
 
-  // Zeile 1: Abstand
-  if (isnan(d.rangeM)) {
+  // v7.4: während eines OTA-Updates nur Fortschritt anzeigen
+  int8_t ota = otaPercent;
+  if (ota >= 0) {
+    oled.drawStr(0, 12, "OTA-Update");
+    snprintf(line, sizeof(line), "%d %%", ota);
+    oled.drawStr(0, 28, line);
+    oled.drawStr(0, 44, "Motoren gestoppt");
+    oled.drawStr(0, 60, "Nicht ausschalten!");
+  } else {
+
+  // Zeile 1: Abstand (v7.4: in den ersten 10 s die IP-Adresse)
+  if (millis() - displayStartMs < 10000) {
+    snprintf(line, sizeof(line), "IP %s", robotIp);
+  } else if (isnan(d.rangeM)) {
     snprintf(line, sizeof(line), "Abstand: --");
   } else if (isinf(d.rangeM)) {
     snprintf(line, sizeof(line), "Abstand: %s", d.rangeM > 0 ? "frei (>4m)" : "zu nah");
@@ -663,6 +697,7 @@ void drawDisplay(const DisplayData &d) {
     }
   }
   oled.drawStr(0, 60, line);
+  }  // Ende normale Anzeige (v7.4)
 
   // Seitenweise Übertragung (8 Zeilen à 8 Pixel = 128 Byte, je ca. 4 ms), Bus zwischen den Seiten frei
   for (uint8_t row = 0; row < 8; row++) {
@@ -702,7 +737,7 @@ void setupDisplay() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tf);
   oled.sendBuffer();
-  showScreen("robot_base v7.3", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
+  showScreen("robot_base v7.4.1", "verbinde WLAN", "und Agent ...", "Bumper L erst danach!");
 }
 
 // ---------- Bumper: Interrupt -> Semaphore -> Task (v6) ----------
@@ -995,10 +1030,42 @@ void setupTransport() {
   DBG("\n=== robot_base (WLAN) ===\nVerbinde mit WLAN '%s' ...\n", ssid);
   set_microros_wifi_transports(ssid, psk, agent_ip, AGENT_PORT);  // blockiert bis WLAN verbunden
   WiFi.setSleep(false);                     // Energiesparmodus aus (geringere Latenz, Annahme)
-  DBG("WLAN verbunden, eigene IP: %s\n", WiFi.localIP().toString().c_str());
+  strncpy(robotIp, WiFi.localIP().toString().c_str(), sizeof(robotIp) - 1);
+  DBG("WLAN verbunden, eigene IP: %s\n", robotIp);
   DBG("Agent: %s, Port %d\n", agent_ip.toString().c_str(), (int)AGENT_PORT);
 #endif
 }
+
+#if OTA_ENABLED
+// v7.4: OTA nach Anleitung 4.1.4. WLAN steht bereits (micro-ROS-Transport).
+void setupOta() {
+  ArduinoOTA.setHostname("ezmr-robot");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.onStart([]() {
+    stopMotors();                          // zuerst: Roboter darf während des Uploads nicht fahren
+    otaPercent = 0;
+    if (displayTaskHandle != NULL) xTaskNotifyGive(displayTaskHandle);
+    DBG("OTA: Start (%s) – Motoren gestoppt\n",
+        ArduinoOTA.getCommand() == U_FLASH ? "Firmware" : "Dateisystem");
+  });
+  ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+    int8_t p = total ? (int8_t)(done * 100UL / total) : 0;
+    if (p != otaPercent) {
+      otaPercent = p;
+      if (displayTaskHandle != NULL) xTaskNotifyGive(displayTaskHandle);
+    }
+  });
+  ArduinoOTA.onEnd([]() {
+    DBG("OTA: fertig, Neustart\n");
+  });
+  ArduinoOTA.onError([](ota_error_t err) {
+    otaPercent = -1;                       // normale Anzeige; Motoren bleiben gestoppt bis zum nächsten Befehl
+    DBG("OTA: Fehler %u\n", (unsigned)err);
+  });
+  ArduinoOTA.begin();
+  DBG("OTA bereit: Hostname ezmr-robot, IP %s\n", robotIp);
+}
+#endif
 
 void setup() {
   serialMutex = xSemaphoreCreateMutex();
@@ -1023,9 +1090,13 @@ void setup() {
   imuMutex = xSemaphoreCreateMutex();
   setupDisplay();                           // vor dem Task-Start: nur dieser Kontext nutzt I2C
   bool imuOk = setupImu();                  // Kalibrierung: Roboter muss 3 s stillstehen
-  showScreen("robot_base v7.3", imuOk ? "IMU ok" : "IMU FEHLER", "verbinde WLAN", "und Agent ...");
+  showScreen("robot_base v7.4.1", imuOk ? "IMU ok" : "IMU FEHLER", "verbinde WLAN", "und Agent ...");
 
   setupTransport();
+#if OTA_ENABLED
+  setupOta();
+  showScreen("robot_base v7.4.1", "WLAN ok, IP:", robotIp, "warte auf Agent ...");
+#endif
   delay(2000);
 
   allocator = rcl_get_default_allocator();
@@ -1097,6 +1168,7 @@ void setup() {
   DBG("Sensorströme: %s\n", STREAM_BEST_EFFORT ? "best effort" : "reliable");
 #if DISPLAY_IN_TASK
   // Display-Task auf Kern 0 (loop() läuft auf Kern 1), Priorität 1, 4 KB Stack
+  displayStartMs = millis();
   xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, 1, &displayTaskHandle, 0);
   DBG("Display: eigene Task auf Kern 0 (loop auf Kern %d)\n", xPortGetCoreID());
 #elif DISPLAY_IN_LOOP
@@ -1149,6 +1221,9 @@ uint32_t lastDisplayMs = 0;
 
 void loop() {
   uint32_t loopStartUs = micros();
+#if OTA_ENABLED
+  ArduinoOTA.handle();                       // v7.4: blockiert nur während eines laufenden Uploads
+#endif
   RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 
   uint32_t now = millis();

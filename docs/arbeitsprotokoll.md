@@ -18,7 +18,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 2.4 | Sensorprojekt (Erfassung ESP32, Auswertung Host) | ✔ Ultraschall-Hinderniserkennung mit Sicherheitsfilter, Reaktionszeitmessung und akustischer Abstandswarnung (Stufe 10a–d) · Anforderungen von 2.4 erfüllt (Abgleich 08.10.2026) · Erweiterung Display (Stufe 11) |
 | 2.5 | TurtleBot 4 | ausgeschlossen |
 | 2.6 | FreeRTOS (optional) | ✔ Kernkonzepte umgesetzt (Stufe 11): Tasks auf Kern 0 (Display, Bumper), Mutex (Anzeigedaten, Motor-UART, Serial), Task-Notification, Interrupt → binäre Semaphore → Task; Laufzeit- und Reaktionszeitmessung |
-| OTA | OTA-Updates (optional) | nicht ausgewählt |
+| OTA | OTA-Updates (optional, Anleitung 4.1.4) | ✔ umgesetzt (Stufe 11j, Firmware v7.4/v7.4.1): Upload über WLAN, Motorstopp bei Update-Beginn, Passwort, mDNS-Name |
 
 ### Stufenplan
 
@@ -34,7 +34,7 @@ Offene oder ungeprüfte Punkte sind als solche gekennzeichnet.
 | 8 | Differentialantrieb: Twist → Radgeschwindigkeiten | 2.3 | ✔ (aufgebockt, inkl. Timeout-Stopp) |
 | 9 | `shape_driver` auf dem realen Roboter | 2.3 | ✔ (WLAN-Transport, Kalibrierung, Viereck) |
 | 10 | Sensorintegration (HC-SR04, Buzzer) | 2.4 | ✔ 10a Messung, 10b Hinderniserkennung, 10c Reaktionszeit, 10d akustische Warnung |
-| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort), 11g Scheinhindernisse = Bodenecho (Abhilfe offen), 11h Launch-Datei + v7.2, 11i Erkundung mit Ultraschallkarte (wander/odom/sonar_map, v7.3) |
+| 11 | Erweiterung: OLED-Display, Bumper, IMU mit FreeRTOS (2.6) | 2.4 / 2.6 | ✔ 11a–d Display, 11e Bumper (v6), 11f IMU-Drehregelung (v7.1), Grundlast geklärt (best effort), 11g Scheinhindernisse = Bodenecho (Abhilfe offen), 11h Launch-Datei + v7.2, 11i Erkundung mit Ultraschallkarte (wander/odom/sonar_map, v7.3), 11j OTA (v7.4.1) |
 | 12 | Abgabe: Repository und Beleg | 3 | ⏳ |
 
 ---
@@ -1150,9 +1150,60 @@ Startet obstacle_stop, distance_warner, odom, sonar_map, RViz2; wander nach `wan
 #### Firmware v7.3 – IMU-Nullpunkt per Topic neu messen
 Subscriber `/imu_reset` (std_msgs/UInt8): 1 = Gyro-Nullpunkt 3 s neu messen und Gierwinkel auf 0, 0 = nur Winkel 0. Ausführung in der imuTask, **nur im Stillstand** (beide Räder param 0, Flag aus `controlStep`); fährt der Roboter an, wird abgebrochen. Neuer Nullpunkt nur übernommen, wenn er < 5 °/s vom alten abweicht. Während der Messung bleibt der Winkel stehen, Display „IMU kalibriert…“. Executor 4 Subscriber. `explore_launch.py` sendet `/imu_reset` beim Start (3× im Abstand von 1 s; weitere Anfragen während der Messung ignoriert). Auswirkung auf andere Nodes: odom verwirft den Winkelsprung im Stillstand (Grenze 1,5 °/s); wander/shape_driver/range_scan wären nur bei einem Reset **während** einer Drehung betroffen – durch die Stillstandsbedingung ausgeschlossen. Zusätzlich beginnt odom jetzt bei exakt 0,0° (vorher −0,3° durch die erste Sekunde vor dem Einfrieren).
 Aufspielen: erster Versuch „Failed to communicate with the flash chip“ – **linker Bumper (GPIO12) steckte**; nach Abziehen ✔ (Startbild „robot_base v7.3“).
-Stand: v7.3, Richtungswechsel ohne Hindernis und `imu_reset` im Launch **ungetestet** (Akku wird geladen) → Tests R1 (Reset ohne Fahrt) und E4 (Erkundung) ausstehend.
+**Tests 12.10.2026 (Schreibtisch, alle Ränder mit Hindernissen ≥ 5 cm begrenzt – Ultraschall erkennt keine Tischkante; Fugenproblem entfällt):**
+
+| Test | Einstellung | Ergebnis | Befund → Änderung |
+|---|---|---|---|
+| E4 | v7.3 + `imu_reset`, ±90° | `/imu_reset` gesendet (`ros2 topic pub --times 3 --rate 1` beendet sich sauber); gelernte Drift **−0,002 … −0,005 °/s** (vorher −0,28 … −0,31 °/s); Richtung startet bei 0,0°; 180 s, 2,81 m, 15 Hindernisse, 1 Bumper | Freiwilliger Richtungswechsel **nicht aktiv** (kein Log, alte Zusammenfassung): neue `wander.py` lag in `src/`, aber nicht in `install/` → Build/Source fehlte. Prüfung künftig mit `grep` in `install/…/site-packages/shape_driver/` |
+| E5 | ±90°, freiwillig nach 6–15 s | ✔ 180 s, **3,07 m**, 8 Hindernisse, **0 Bumper**, 16 Drehungen (8 freiwillig); Weg verteilt sich über die Fläche; 1 kurze Datenlücke (WLAN) → angehalten, weiter | – |
+| E6 | ±45° (Wunsch Nutzer) | 180 s, 2,39 m, **24 Hindernisse, 5 Bumper**, 33 Drehungen (4 freiwillig); viele Ketten „Hindernis nach 0.0 s“, Sperren erst bei 0,07–0,10 m | Bei 45° läuft der Roboter oft schräg auf Wände zu; schräg getroffene Flächen reflektieren den Schall vom Sensor weg → späte/keine Erkennung (Deutung, nicht gemessen). **90° beibehalten.** Wunsch: Drehrichtung abhängig von der Lage des Hindernisses |
+| E7 | ±90°, freiwillig, **Bumper-Seite + Umschauen** | ✔ 180 s, **3,12 m**, **4 Hindernisse**, 13 Drehungen (6 freiwillig); 2× umgeschaut: „links 0,51 m, rechts 0,29 m → links“, „links 0,30 m, rechts 0,65 m → rechts“; Weg verteilt sich in mehrere Richtungen, Umriss der Fläche weitgehend geschlossen | Zusammenfassung meldet „0 Bumper“, obstacle_stop meldete aber 2 Bumper-Kontakte **während einer Drehung** (Front schwenkt beim Drehen an Gegenständen entlang; Sensor sitzt 10 cm vor der Achse) – wander zählt nur Kontakte bei Geradeausfahrt |
+
+**Neu in wander.py (E7):**
+- **Bumper-Seite:** links getroffen → nach rechts drehen, rechts → links (aus `/bumper`, Bit 0 links, Bit 1 rechts; gültig 2 s); beide Seiten → wie Ultraschall-Hindernis.
+- **Umschauen** (`look_around`, im Launch Standard an): nach dem Zurücksetzen auf ±90° drehen (erste Seite zufällig), je 0,6 s `/range` sammeln (Median; `inf` = 4 m, `nan`/`-inf` = 0), zur Seite mit mehr Platz; beide < 0,35 m → Wende. Kosten ≈ 15 s je Hindernis (90° + 180° Drehung + 2 Messungen).
+- Simulation vorab: Korridor 0,6 m → „beide zu, wenden“; freie Seite korrekt gewählt; Bumper-Regel für Bits 1/2/3 geprüft.
+
+**Vergleich (je eine Fahrt à 180 s, gleicher Aufbau):** E7 hatte die wenigsten Hindernisse (4 gegenüber 8 in E5 und 24 in E6) und bei Geradeausfahrt keinen Bumper-Kontakt, bei gleicher Strecke wie E5 (3,12 / 3,07 m). Einschätzung Nutzer: beste Fahrt. Einschränkung: Zufallsfahrten, jeweils nur ein Durchlauf – Unterschiede zwischen E5 und E7 sind ein Hinweis, kein Nachweis.
+Kartenbild E7: `docs/bilder/e7_erkundung_karte.png`.
+
 
 **Bewertung bisher:** Die Kette Zufallsfahrt → Odometrie → Karte funktioniert mit einem Befehl. Die Kartenqualität wird begrenzt durch (1) den einzelnen, breiten Ultraschallstrahl (unscharfe Bögen statt Konturen), (2) die Odometrie ohne Radsensoren und ohne Korrektur durch die Karte (kein SLAM), (3) Bodenecho an Fugen (11g). Der wichtigste gefundene Fehler war die Gyro-Drift nach längerer Betriebszeit; sie wird jetzt doppelt behandelt (Nullpunkt neu messen auf dem ESP32, Driftschätzung im Stillstand auf dem Host).
+
+### 12.10.2026 – Stufe 11j: Firmware-Update über WLAN (OTA, optional nach Anleitung 4.1.4)
+
+**Ziel:** Firmware ohne USB-Kabel aufspielen (kein Wechsel USB ↔ Akku). Anleitung 4.1.4 (S. 12): `upload_protocol = espota`, `ArduinoOTA.begin()` in `setup()` nach dem WLAN-Aufbau, `ArduinoOTA.handle()` regelmäßig in `loop()`.
+
+**Umsetzung Firmware v7.4 / v7.4.1** (nur Transport WLAN; `env:serial` ohne OTA):
+- `ArduinoOTA` mit Hostname `ezmr-robot`, Passwort `OTA_PASSWORD` aus `include/secrets.h` (nicht im Repository; ohne Eintrag bricht der Build mit `#error` ab). Vorlage `secrets.h.example` um den Eintrag ergänzt.
+- **Sicherheit:** Während des Uploads hängt `loop()` in `ArduinoOTA.handle()` → Regelschritt, Timeout-Stopp (500 ms) und micro-ROS laufen nicht; die Motorcontroller behielten den letzten Befehl. Deshalb im Rückruf `onStart` zuerst `stopMotors()`. Display-Task (Kern 0) läuft weiter und zeigt „OTA-Update“, Fortschritt in %, „Motoren gestoppt“.
+- IP-Adresse im Startbild und 10 s nach dem Start in Zeile 1.
+- v7.4.1: `ArduinoOTA.handle()` zusätzlich in `error_loop()` – Update auch möglich, wenn kein Agent erreichbar ist (vorher Endlosschleife ohne OTA).
+- `platformio.ini`: neue Umgebung `[env:ota]` (`extends = env:wifi`, `upload_protocol = espota`); IP und Passwort aus Umgebungsvariablen (`upload_port = ${sysenv.ROBOT_IP}`, `upload_flags = --auth=${sysenv.OTA_PASSWORD}`), damit keine Zugangsdaten im Repository stehen.
+
+**Upload über WLAN:**
+```bash
+cd ~/robotik_praktikum/firmware/robot_base
+export ROBOT_IP=ezmr-robot.local
+export OTA_PASSWORD=$(grep "define OTA_PASSWORD" include/secrets.h | cut -d'"' -f2)
+PLATFORMIO_BUILD_FLAGS="-DDISPLAY_MODE=1 -DSTREAM_BEST_EFFORT=1" pio run -e ota -t upload
+```
+
+**Tests:**
+
+| Test | Durchführung | Ergebnis |
+|---|---|---|
+| Erstinstallation | v7.4 einmalig per USB (`-e wifi`) | ✔ Build mit `ArduinoOTA` erfolgreich |
+| OTA-1 | Upload über WLAN, linker Bumper ab | ✔ `[SUCCESS]`, Display „OTA-Update“ mit Fortschritt, Neustart mit v7.4. Roboter per mDNS als `ezmr-robot.local` erreichbar (`ping`) |
+| OTA-2 | Upload mit eingestecktem linkem Bumper | 1× `Error Uploading` nach einem Neustart mit eingestecktem Bumper; bei bereits laufendem ESP32 gelang der Upload laut Nutzer auch mit Bumper. Ursache wie bisher GPIO12 (Strapping-Pin) beim Start – Upload selbst nicht betroffen (Deutung, nicht im Einzelnen nachgewiesen) |
+| v7.4.1 | per OTA aufgespielt | ✔ |
+| OTA-3 | Roboter dreht auf der Stelle (`ros2 topic pub -r 10 /cmd_vel … angular.z 0.3692`), währenddessen OTA-Upload | ✔ Räder stoppen mit Erscheinen von „OTA-Update“, Upload erfolgreich |
+
+Anfängliche Bedienfehler (dokumentiert, damit sie nicht wieder passieren): Ergänzungsblock mehrfach an `platformio.ini`/`secrets.h` angehängt (→ „section 'env:ota' already exists“), einmal im falschen Ordner (Repo-Wurzel) ausgeführt; Platzhalter `<IP …>` wörtlich übernommen (`<` ist in der Bash eine Umleitung → Variable leer).
+
+**Regel (übernommen):** Vor Einschalten, EN, USB-Upload **und OTA-Upload** den linken Bumper (JP4/GPIO12) abziehen.
+
+**Nutzen:** Firmware-Updates im Akkubetrieb ohne Umstecken; der Motorstopp bei Update-Beginn verhindert unkontrolliertes Weiterfahren.
 
 ---
 
@@ -1162,7 +1213,8 @@ Stand: v7.3, Richtungswechsel ohne Hindernis und `imu_reset` im Launch **ungetes
 - [x] Firmware v5.1: Fehleranzeige, Buzzer-Pin, Startbild Modus 0 (09.10.2026)
 - [x] Grundlast der Schleife: Ursache reliable-Publisher über WLAN, mit best effort weitgehend behoben (11f-b)
 - [x] Scheinhindernisse 0,16–0,18 m (Seiten 2 und 4): Ursache Bodenecho an Dielenfugen quer zur Schallrichtung (11g)
-- [ ] 11i: Test R1 (`/imu_reset` ohne Fahrt) und E4 (Erkundung mit v7.3 und freiwilligem Richtungswechsel) – nach dem Laden des Akkus
+- [x] 11i: v7.3/`imu_reset` (E4: Drift ≈ 0), freiwilliger Richtungswechsel (E5), Bumper-Seite + Umschauen (E7) getestet (12.10.)
+- [ ] Optional: wander zählt Bumper-Kontakte auch während Drehungen; mehrere Fahrten je Variante für belastbaren Vergleich
 - [x] Sensor: Höhe ≈ 3 cm, mittig (Sender/Empfänger je 1,5 cm neben der Mitte) → `sensor_y = 0` in `explore_launch.py` (12.10.)
 - [ ] Optional: Kegelbreite (`cone_half_deg`) mit einem Gegenstand in bekanntem Abstand/Winkel prüfen
 - [ ] Viereck auf dem Dielenboden mit Start 45° schräg zu den Fugen (Vorhersage aus 11g prüfen) – optional
