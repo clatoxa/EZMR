@@ -1,0 +1,9 @@
+distance_warner:
+  ros__parameters:
+    range_topic: /range
+    buzzer_topic: /buzzer
+    enabled: true
+    distances: [0.50, 0.35, 0.20, 0.10]   # m, absteigend (Vorschlag)
+    periods_ms: [800, 400, 200, 1]        # Pieptakt je Stufe; 1 = Dauerton
+    median_window: 3
+    range_timeout: 0.5                    # s

@@ -1,0 +1,18 @@
+# colcon: generierte Verzeichnisse (werden bei jedem Build neu erzeugt)
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Python-Zwischendateien
+__pycache__/
+*.pyc
+
+# PlatformIO / ESP32-Firmware (ab Abschnitt 2.3)
+.pio/
+
+# Editor-Einstellungen
+.vscode/
+
+# Lokale Zugangsdaten (z. B. WLAN-Passwort) – niemals ins öffentliche Repo
+**/secrets.h
+**/*.local.ini
