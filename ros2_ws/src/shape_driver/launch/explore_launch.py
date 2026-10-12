@@ -14,21 +14,24 @@ nach ~/messungen/karten/.
 Argumente (Standard):
   duration      (300)   s Zufallsfahrt
   wander_delay  (20)    s Wartezeit vor der Fahrt
-  sensor_y      (0.02)  m seitlicher Versatz des Ultraschallsensors (+ links, − rechts)
+  sensor_y      (0.0)   m seitlicher Versatz des Ultraschallsensors (+ links, − rechts); Sensor mittig
+                        (Sender/Empfänger je 1,5 cm links/rechts der Mitte, Messung 12.10.)
   warner        (true)  Buzzer
   rviz          (true)  RViz2 mit config/explore.rviz
   seed          (-1)    Zufallsfolge (>= 0: reproduzierbar)
+  imu_reset     (true)  beim Start /imu_reset senden: ESP32 misst Gyro-Nullpunkt neu, Winkel 0 (Firmware ≥ v7.3)
+  fwd_min / fwd_max (6 / 15) s: nach zufälliger Fahrzeit freiwillig abbiegen (gegen Pendeln, Test E3)
   turn_min_deg / turn_max_deg (90 / 90)  Drehwinkel beim Ausweichen; 90/90 = immer ±90° (Richtung
                         zufällig) -> rechtwinklige Bahn; bei Start 45° zu den Dielenfugen bleiben alle
                         Fahrtrichtungen schräg zu den Fugen (weniger Bodenecho, Stufe 11g)
 
-Stand 09.10.2026: getestet mit Drehung 90–180° (Test E1); turn_min/max-Argumente UNGETESTET.
+Stand 09.10.2026: getestet (E1–E3); imu_reset und fwd_min/fwd_max UNGETESTET.
 """
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -42,10 +45,13 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument('duration', default_value='300.0'),
         DeclareLaunchArgument('wander_delay', default_value='20.0'),
-        DeclareLaunchArgument('sensor_y', default_value='0.02'),
+        DeclareLaunchArgument('sensor_y', default_value='0.0'),
         DeclareLaunchArgument('warner', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('seed', default_value='-1'),
+        DeclareLaunchArgument('imu_reset', default_value='true'),
+        DeclareLaunchArgument('fwd_min', default_value='6.0'),
+        DeclareLaunchArgument('fwd_max', default_value='15.0'),
         DeclareLaunchArgument('turn_min_deg', default_value='90.0'),
         DeclareLaunchArgument('turn_max_deg', default_value='90.0'),
     ]
@@ -71,11 +77,21 @@ def generate_launch_description():
             'seed': ParameterValue(lc('seed'), value_type=int),
             'turn_min_deg': ParameterValue(lc('turn_min_deg'), value_type=float),
             'turn_max_deg': ParameterValue(lc('turn_max_deg'), value_type=float),
+            'max_forward_min': ParameterValue(lc('fwd_min'), value_type=float),
+            'max_forward_max': ParameterValue(lc('fwd_max'), value_type=float),
         }])
+
+    # Firmware v7.3: Nullpunkt neu messen + Winkel 0. Dreimal im Abstand von 1 s senden, falls die erste
+    # Nachricht vor dem Verbindungsaufbau verloren geht; der ESP32 ignoriert Anfragen während der Messung.
+    imu_reset = ExecuteProcess(
+        cmd=['ros2', 'topic', 'pub', '--times', '3', '--rate', '1', '/imu_reset',
+             'std_msgs/msg/UInt8', '{data: 1}'],
+        output='log', condition=IfCondition(lc('imu_reset')))
 
     return LaunchDescription(args + [
         LogInfo(msg='Agent separat starten. Roboter jetzt NICHT bewegen – Driftschätzung läuft.'),
         *nodes,
+        imu_reset,
         TimerAction(period=lc('wander_delay'), actions=[
             LogInfo(msg='Zufallsfahrt startet.'),
             wander,
