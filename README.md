@@ -172,17 +172,40 @@ Zum Herunterladen des Videos wird Git LFS benötigt: `git lfs install && git lfs
 
 ## Teil C – Programmieraufgaben in C
 
-TCP-Kommunikation zwischen Client und Server; Dateien mit `ptp` bzw. `peer` enthalten nach ihrem Namen
-Peer-to-Peer-Varianten. [ERGÄNZEN (Clara): kurze Aufgabenbeschreibung]
+TCP-Kommunikation zwischen Client und Server sowie erweiterte Interprozesskommunikation (System V) mit Message Queues, Shared Memory und Semaphoren; detaillierte Protokolle und Anleitungen liegen in den jeweiligen Unterordnern.
 
-| Datei | Inhalt |
+| Datei / Verzeichnis | Inhalt |
 |---|---|
-| `Programmieraufgaben/Protokol.md` | Kommunikationsprotokoll (Nachrichtenformat, Kommandos wie `ADD`, Antworten) |
-| `client.c`, `client1.c`, `client1_ptp.c`, `peer.c`, `socket.c`, `socket_ptp.c` | Quelltexte |
-| `a.out`, `client`, `client1`, `peer`, `socket` | kompilierte Programme |
+| `Programmieraufgaben/3/Protocol.md` & `Programmieraufgaben/4/Protocol.md` | Kommunikationsprotokolle, Nachrichtenformate und Kommandos (`ADD`, `PRIME`, `LIST`, `CLEAR`) |
+| `Programmieraufgaben/3/` (`socket.c`, `client.c`, `client1.c`, `peer.c`) | Quelltexte der TCP-Socket-Implementierungen und P2P-Erweiterung |
+| `Programmieraufgaben/4/` (`server_ipc.c`, `client_ipc.c`, `peer_shm.c`) | Quelltexte der System-V-IPC- und Shared-Memory-Varianten |
+| `socket`, `client`, `peer`, `server_ipc`, `peer_shm` | Ausführbare Binärdateien (müssen vorab selbst kompiliert werden) |
 
-[ERGÄNZEN (Clara): Übersetzen und Starten, z. B. `gcc -o socket socket.c`, Reihenfolge Server/Client, Port]
+### Übersetzen und Starten (Beispiele)
 
+* **TCP-Sockets & P2P:**
+```bash
+  gcc Programmieraufgaben/3/socket.c -o socket
+  gcc Programmieraufgaben/3/client.c -o client
+  gcc Programmieraufgaben/3/client1.c -o client1
+  gcc Programmieraufgaben/3/peer.c -lpthread -o peer
+```
+
+* **System V IPC:**
+```bash
+  gcc Programmieraufgaben/4/server_ipc.c -o server_ipc
+  gcc Programmieraufgaben/4/client_ipc.c -o client_ipc
+  gcc Programmieraufgaben/4/peer_shm.c -lpthread -o peer_shm
+```
+* **Starten mit ./ (Beispiele)**
+```
+# Terminal 1: Server starten
+./server_ipc
+
+# Terminal 2: Client starten
+./client_ipc
+```
+Detaillierte Startanleitungen stehen in Programmieraufgaben/3/Protocol.md und Programmieraufgaben/4/Protocol.md
 ---
 
 ## Lizenz
